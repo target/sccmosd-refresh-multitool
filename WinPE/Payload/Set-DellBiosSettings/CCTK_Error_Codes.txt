@@ -1,0 +1,527 @@
+http://en.community.dell.com/techcenter/systems-management/w/wiki/1953.dell-client-configuration-toolkit-cctk-error-codes
+
+
+CCTK error codes as of version 2.2.1:
+
+0. Success.
+
+1. Attempt to read write-only parameter '%s'.
+
+2. Password cannot exceed 16 characters.
+
+3. A BMC was either not detected or is not supported.
+
+4. This username is already in use. Enter a unique username.
+
+5. Access mode not supported.
+
+6. Cannot return number of requested data bytes.
+
+7. User ID 1 cannot be assigned a username.
+
+8. Cannot execute duplicated request.
+
+9. There was an error clearing the SEL.
+
+10. Clear SEL cannot be accompanied with any other option.
+
+11. racreset cannot be accompanied with any other option.
+
+12. Cannot execute command '%s'. Command, or request parameter(s), not supported in present state.
+
+13. Command not supported on given channel.
+
+14. The community string may only contain printable ASCII characters.
+
+15. Destination unavailable. Cannot deliver request to selected destination.
+
+16. Cannot execute command. Insufficient privilege level.
+
+17. Command illegal for specified sensor or record type.
+
+18. Invalid commstring value.
+
+19. Hardware subsystem error. Invalid data field in Request.
+
+20. Invalid destination IP address.
+
+21. The GUID is invalid.
+
+22. Invalid gateway.
+
+23. Invalid hostname.
+
+24. Invalid IP address.
+
+25. Invalid DNS IP address.
+
+26. Invalid sub net mask. 
+27. Invalid value for PEF. PEF value should be between 1 and 16.
+
+28. Reservation Canceled or Invalid Reservation ID.
+
+29. Invalid Time to live value.
+
+30. Invalid VLANID value.
+
+31. Invalid Command. Used to indicate an unrecognized or unsupported command.
+
+32. Command invalid for given LUN.
+
+33. Load defaults cannot be accompanied with any other option.
+
+34. There was an error loading the defaults.
+
+35. Node Busy. Command could not be processed because command processing resources are temporarily unavailable.
+
+36. Out of space. Command could not be completed because of a lack of storage space required to execute the given command operation.
+
+37. This parameter is not supported.
+
+38. Parameter out of range. One or more parameters in the data field of the Request are out of range.
+
+39. The password may only contain printable ASCII characters.
+
+40. Password test failed.
+
+41. Requested data length invalid.
+
+42. Requested data field length limit exceeded.
+
+43. Requested Sensor, data, or record not present.
+
+44. Request data truncated.
+
+45. Command response could not be provided.
+
+46. Command response could not be provided. BMC initialization or initialization agent in progress.
+
+47. Command response could not be provided. Device in firmware update mode.
+
+48. Command response could not be provided. SDR Repository in update mode.
+
+49. Cannot execute command, SEL erase in progress.
+
+50. Attempt to set the 'set in progress' value when not in the 'set in complete' state.
+
+51. The SOL character 'accumulate interval' is invalid.
+
+52. The SOL character 'send threshold' is invalid.
+
+53. The SOL 'retry interval' is invalid.
+
+54. Command completed successfully.
+
+55. Timeout while processing command. Response unavailable.
+
+56. Unspecified error.
+
+57. The password may only contain printable ASCII characters.
+
+58. Username cannot exceed 16 characters.
+
+59. Invalid VLANID value. Enter in 'dddd' format.
+
+60. Attempt to write read-only parameter '%s'.
+
+61. BMC is busy.
+
+62. Response data did not return successfully.
+
+63. BMC time out error.
+
+64. Invalid Configuration Option.
+
+65. Cannot execute command.Parameter is illegal because command sub-function has been disabled or is unavailable.
+
+66. Option '%s' requires an argument.
+
+67. The asset tag for this system is not available.
+
+68. The asset tag cannot be more than 10 characters long.
+
+69. The required BIOS interfaces cannot be found on this system.
+
+70. The BIOS version information is not available.
+
+71. There is not enough free system memory to complete the BIOS update.
+
+72. The BIOS update file version is a different version class (A00, X00) than the current system BIOS. Use the --force option to use this BIOS image.
+
+73. The BIOS update file version is older than the current system bios. Use the --force option to use this BIOS image.
+
+74. The BIOS update file version is identical to the current system bios. Use the --force option to use this BIOS image.
+
+75. The sequence list must be a comma-separated numerical list of valid unique boot device numbers (ex: 2, 1, 3).
+
+76. The sequence list must be a comma-separated list of valid unique device names (ex: nic.emb.1, hdd.emb.1) or a comma-separated numerical list of valid unique boot device numbers (ex: 2, 1, 3).
+
+77. There was an error setting the sequence.
+
+78. The list is not formatted correctly. See the help for more details.
+
+79. The size of returned buffer is larger than the size of allocated buffer.
+
+80. There was a problem getting the state byte.
+
+81. The state byte is not available on this system.
+
+82. There was a problem setting the state byte.
+
+83. The state byte must be a value between 0 and 255 decimal.
+
+84. The CPU information is not available.
+
+85. The dependent option '%s' required for this subcommand is missing in the command line.
+
+86. Duplicate sub command '%s' has been entered.
+
+87. The script file does contain not a valid DTK environment script signature. (%s)
+
+88. The format of the environment variable is incorrect.
+
+89. The --envar/-s option can only be used for a single option.
+
+90. The --envar/-s option can only be used for report operations.
+
+91. The individual sub commands should be specified for the -s option.
+
+92. Getting external serial connector settings failed.
+
+93. Setting external serial connector settings failed.
+
+94. There was an error opening the file %s.
+
+95. File '%s' does not have write permission.
+
+96. The file contains invalid option '%s'.
+
+97. The replication information does not match for this system.
+
+98. There can only be one section in the input file.
+
+99. Bad ini file, the required section [%s] cannot be found.
+
+100. The format of the bios image file is incorrect.
+
+101. Report operations and set operations must be separate.
+
+102. Help is not available for the option '%s'.
+
+103. The -x (--hex) option can only be used with -b or -r.
+
+104. Input file '%s' not found.
+
+105. Input file '%s' cannot be read.
+
+106. Invalid argument for the provided option '%s'.
+
+107. Function table lookup error.
+
+108. The machine ID was not found in the file '%s'.
+
+109. The system memory information is not available.
+
+110. Mode can only be used with the --pci option.
+
+111. The device name or index must be present in the boot order.
+
+112. The output file '%s' could not be opened. Please make sure the path exists and the media is not write protected.
+
+113. Could not write to output file, disk may be full.
+
+114. The old password must be supplied to set a new password using --valsyspwd.
+
+115. The old password must be supplied to set a new password using --valsetuppwd.
+
+116. The current password can only be supplied when setting a new password.
+
+117. Actions are not allowed for this filter. Only alerts are allowed.
+
+118. There was an error getting the option '%s'.
+
+119. The option '%s' is not available or cannot be configured through this tool.
+
+120. There was an error setting the option '%s'.
+
+121. The -n (--namefile) option can only be used with --pci.
+
+122. The password may only contain alphanumeric characters.
+
+123. The BIOS passwords have been disabled via jumper.
+
+124. The password length must be between 1 and 32.
+
+125. This password is locked and can only be unlocked by the admin user.
+
+126. There was an error setting the password.
+
+127. The LCD string length must be between 1 and the maximum value %s.
+
+128. The LCD string may only contain alphanumeric characters.
+
+129. There was an error setting the LCD string.
+
+130. The second channel can only be set if the RAID controller is set to RAID.
+
+131. The set operation, '%s', requires sub commands.
+
+132. The service tag for this system is not available.
+
+133. The system ID value is not available.
+
+134. The system information string is not available.
+
+135. A system error has occured.
+
+136. Usage error.
+
+137. The uuid information is not present on this system.
+
+138. The manufacturing/first-power-on date information is not present on this system.
+
+139. Version cannot be accompanied with any other option.
+
+140. The self-identify blinker timer should be set to 0..255 second(s).
+
+141. Encrypt key is too long.
+
+142. Encrypt key is invalid, accepted characters are 0 to 9 or A to F.
+
+143. Parameter has been temporarily disabled due to a dependancy on other settings.
+
+144. The old password supplied is incorrect. The new password will not be set. Please try again.
+
+145. Cannot start /etc/omreg.cfg file. Please ensure /etc/omreg.cfg file is present and is valid for your environment. You can copy this file from the DTK iso.
+
+146. Getting nicselection settings failed.
+
+147. HAPI Driver Load Error.
+
+148. Filter action power reduction is only supported for the system power warn/fail filters.
+
+149. TPM Clear settings requires setup password.
+
+150. There is currently no TPM Clear request pending.
+
+151. Password is not required for retrieving the TPM options.
+
+152. Setup password is required for setting the TPM options.
+
+153. Invalid Password override.
+
+154. Invalid TPM set option.
+
+155. There was an error setting the TPM option.
+
+156. There is no setup password installed on this system.
+
+157. The setup password supplied is incorrect. Please try again.
+
+158. Profile should be custom for setting cpupowermode, memorypowermode and fanmode.
+
+159. There was an error setting the Power Option.
+
+160. The power cap value entered is out of range. Please try again.
+
+161. The power cap value entered must be between 0 to 100 if unit is percent.
+
+162. Invalid IPv6 address. The IPv6 address cannot be link-local or multicast.
+
+163. Invalid IPv6 address. The IPv6 address specified has incorrect address format.
+
+164. Invalid IPv6 address. The gateway address specified has incorrect address format.
+
+165. Invalid IPv6 address. The Primary DNS server address specified has incorrect address format.
+
+166. Invalid IPv6 address. The Secondary DNS server address specified has incorrect address format.
+
+167. Invalid IPv6 address. The gateway address specified is invalid.
+
+168. Invalid configuration. Attempting to apply IPv6 configuration on a non supported platform.
+
+169. Invalid IPv6 configuration. Attempt to set DNS server address manually while DNS address source is set to auto.
+
+170. Invalid IPv6 configuration. Attempt to set IPv6 address manually while IPv6 address source is set to auto.
+
+171. Invalid IPv6 configuration. Attempting to apply IPv6 configuration without loading IPv6 stack.
+
+172. Invalid IPv4 configuration. Attempting to apply IPv4 configuration with IPv4 disabled.
+
+173. Invalid IPv6 configuration. Ipv6 address cannot be specified without specifying prefix-length.
+
+174. Invalid IPv6 configuration. dnssrcv6 cannot be set to auto when ipsrcv6 is set to manual.
+
+175. Error while executing IPMI Set command.
+
+176. Error while executing IPMI Get command.
+
+177. Error during Trap Alert.
+
+178. Unspecified error.
+
+179. Unsupported device. Re-try with supported device
+
+180. Setup password is installed. Re-try providing setup/admin password
+
+181. System password is required. Re-try providing system password
+
+182. The password supplied is incorrect. Please try again.
+
+183. Password verification failed.
+
+184. Password not changed, new password does not meet criteria.
+
+185. Password not installed in the system.
+
+186. Password is DISABLED by jumper.
+
+187. Error in Validation.
+
+188. Error in Setting the Value.
+
+189. The password length should not exceed the maximum value %s.
+
+190. This is not a Dell machine. CCTK supports only Dell machines.
+
+191. Setup Password is required to change the setting. Use --valsetuppwd to provide password.
+
+192. System Password is required to change the setting. Use --valsyspwd to provide password.
+
+193. Password is not Installed. so use only --setuppwd
+
+194. Password is not Installed. so use only --syspwd
+
+195. The system password supplied is incorrect. Please try again.
+
+196. The Sequence list must be a comma-separated list of valid unique device names (ex: hdd,cdrom).
+
+197. The system revision information is not available for this system.
+
+198. The completion code information is not available for this system.
+
+199. The BIOS characteristics information is not available for this system.
+
+200. The password should not contain special characters. Password characters are limited to alphanumeric (A-Z, a-z, 0-9).
+
+201. Please use 64-bit version of this application.
+
+202. %s cannot be modified when TPM is OFF.
+
+203. System password cannot be set when pwdlock option is in locked state (pwdlock=lock).
+
+204. adddevice option not supported by this machine's BIOS
+
+205. usb device already present in this machine.
+
+206. Unable to get information from BIOS.
+
+207. %s - Error : Unable to store BIOS information.
+
+208. Duplicate entry found in the input list : %s , Operation Aborted.
+
+209. Typo found in the input list : %s , Operation Aborted.
+
+210. Asset tag can have only printable ASCII characters.
+
+211. Multiple inputs will not be accepted.
+
+212. Invalid Hex format.
+
+213. Hex value range should be 0x0 to 0xffff.
+
+214. %s - Only positive numeric values are acceptable.
+
+215. %s - Length cannot exceed two characters.
+
+216. Range for autoon hour value should be 0 to 23(24 hour format).
+
+217. Range for autoon minute value should be 0 to 59.
+
+218. This option Not supported on UEFI Bios.
+
+219. Unable to Set Bootorder.
+
+220. Invalid Arguments. Unable to Set Bootorder.
+
+221. The provided command %s should not combine with other suboptions.
+
+222. The property ownership tag for this system is not available.
+
+223. The property ownership tag cannot be more than 80 characters for non portable machines.
+
+224. The property ownership tag is limited to 48 characters for portable systems.
+
+225. Property ownership tag can have only printable ASCII characters.
+
+226. Error in Setting the Value. Note : In some machines, If Hdd password or System password is set, you can't set Setup password.
+
+227. 'admin/root' privileges required to execute this application.
+
+228. The option related BIOS information is not available in this machine.
+
+229. Improper Output from Bios. Please try again.
+
+230. ;Error in Bootorder.
+
+231. The manufacturing/first-power-on date information is not present on this system.
+
+232. Not Applicable.
+
+233. ;Uefi bootlisttype is not supported in this Machine.
+
+234. Improper Output from Bios. Please try again.
+
+235. ;Error in Bootorder.
+
+236. Unable to get information specific to machine.
+
+237. The input file is invalid.
+
+238. No Status Present.
+
+239. File Do not have configurable Options.
+
+240. Please provide the days to enable.
+
+241. Password is not Installed. Please try again without providing --val%s
+
+242. Please provide the old password to set the new password using --valownerpwd.
+
+243. The owner password is incorrect. Please try again.
+
+244. Error in setting the value. Note : Setup or system password might be set on the system. Clear the password(s) and try again.
+
+245. Owner password is not supported in file operations.
+
+246. Password operation is not supported on the system.
+
+247. The owner of the system has enabled the Owner Access feature. To set the Bios configuration, create setup or system password.
+
+248. Either the system hardware or the BIOS version does not support the option. To resolve the BIOS version issue, upgrade the BIOS to the latest version.
+
+249. Unable to get password information.
+
+250. Please provide the start and stop values. Example: custom:start-end.
+
+251. The start and stop values should be in the range '%s'. 
+252. The stop value should be greater than the start value by 5 percentage.
+
+253. The option '%s' is not supported in this machine.
+
+254. Unable to set '%s'. Note: To set this Option Legacy Option rom(legacyorom) should be enable and secureboot should be disable.
+
+255. Unable to set '%s'. Note: To set this Option bootmode(activebootlist) should be uefi and legacy option rom (legacyorom) should be disable.
+
+256. Unable to set '%s'. Note: To enable this Option secureboot should be disable. To disable this Option secureboot should be disable and bootmode(activebootlist) should be uefi. 
+257. The allowed value for the option in the system are in between %s.
+
+258. The option '%s' is not enabled.
+
+259. Invalid argument. The possible values are: onboard, 1-15 (Slot number of primary video device), and auto.
+
+260. Invalid argument. The arguments must be set in such a way that [Start time] less than or equal [End time] less than or equal [Charge Start time].
+
+261. Unable to set the Non critical Threshold values
+
+262. Error in Setting the Value. Note: To set TPM - 1. Admin Password must be set , 2. TPM must not be owned and 3. TPM must be deactivated.

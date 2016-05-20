@@ -1,0 +1,124 @@
+<job id="RMTRefreshPC">
+	<script language="VBScript" src="ZTIUtility.vbs"/>
+	<script language="VBScript">
+
+' // ***************************************************************************
+' // 
+' // Refresh Encrypted Computer
+' //
+' // File:      RMTRefreshPC.wsf
+' // 
+' // Version:   2.0
+' // 
+' // Purpose:   Stage WinPE On A Encrypted Disk To Allow Refresh To Function
+' // 
+' // Usage:     cscript.exe [//nologo] RMTRefreshPC.wsf [/debug:true]
+' // 
+' // ***************************************************************************
+
+Option Explicit
+RunNewInstance
+
+
+'//----------------------------------------------------------------------------
+'//  Global Constants
+'//----------------------------------------------------------------------------
+
+' No constants are required
+
+
+'//----------------------------------------------------------------------------
+'//  Main Class
+'//----------------------------------------------------------------------------
+Class TGTRefreshPC
+
+	'//------------------------------------------------------------------------
+	'//  Class variable declarations
+	'//------------------------------------------------------------------------
+	Public iRetVal
+
+	'//------------------------------------------------------------------------
+	'//  Constructor to initialize needed global objects
+	'//------------------------------------------------------------------------
+
+	Private Sub Class_Initialize
+	
+	End Sub
+	
+	
+	'//----------------------------------------------------------------------------
+	'//  Main routine
+	'//----------------------------------------------------------------------------
+
+	Function Main
+	
+		Dim strBootMountDir	: strBootMountDir = "C:\Windows\Temp\BootMount"
+		Dim sArchitecture	: sArchitecture= oEnvironment.Item("ImageProcessor")
+		Dim sCMD
+		
+		oLogging.CreateEntry "Validating That WimMount Driver Is Installed", LogTypeInfo	
+		If (oFSO.FileExists("C:\Windows\System32\wimserv.exe") AND oFSO.FileExists("C:\Windows\System32\drivers\wimmount.sys")) Then
+			oLogging.CreateEntry "WimMount Driver Is Installed", LogTypeInfo	
+			
+			oLogging.CreateEntry "Starting WinPE Update", LogTypeInfo	
+
+			'Prepare Mount Directory (strBootMountDir)
+			oLogging.CreateEntry "Preparing " & strBootMountDir, LogTypeInfo	
+			oLogging.CreateEntry "Checking To See If " & strBootMountDir & " Exist", LogTypeInfo
+			If oFSO.FolderExists(strBootMountDir) Then
+				oLogging.CreateEntry "& strBootMountDir & Exists", LogTypeInfo
+				
+				oLogging.CreateEntry "Checking To See If " & strBootMountDir & " Is Empty", LogTypeInfo		
+				If IsFolderEmpty(strBootMountDir) Then
+					oLogging.CreateEntry "" & strBootMountDir & " Is Empty", LogTypeInfo
+				Else
+					oLogging.CreateEntry "ERROR - " & strBootMountDir & " Is Not Empty", LogTypeError
+					iRetVal = 1
+					Exit Function
+				End IF
+				
+			Else
+				oLogging.CreateEntry "" & strBootMountDir & " Does Not Exist. Creating", LogTypeInfo
+				oFSO.CreateFolder strBootMountDir
+			End IF
+
+			'Mount The Staged Boot Wim To strBootMountDir
+			oLogging.CreateEntry "Mounting C:\Sources\Boot.wim As RW To " & strBootMountDir, LogTypeInfo
+			sCMD = "/MountRW C:\Sources\Boot.WIM 1 " & strBootMountDir
+			iRetVal = oUtility.FindExeAndRunWithLogging( "imagex.exe", sCMD )
+			If iRetVal <> 0 then
+				oLogging.CreateEntry "ERROR - An Error Occured While Mounting C:\Sources\Boot.wim to " & strBootMountDir, LogTypeError
+				iRetVal = 1
+				Exit Function
+			End If
+			
+			'Updating Mounted Boot.wim
+			oLogging.CreateEntry "Updating Mounted Boot.wim With Files Needed For Refresh Process", LogTypeInfo
+			oLogging.CreateEntry "Copying TSEnv.dat", LogTypeInfo
+			oFSO.CopyFile "C:\_SMSTaskSequence\TSEnv.dat", strBootMountDir & "\", true
+						
+		
+			'Unmount & Commit The Boot.Wim
+			oLogging.CreateEntry "Unmounting & Commiting Changes To Boot.wim", LogTypeInfo
+			sCMD = "/unmount /commit " & strBootMountDir
+			iRetVal = oUtility.FindExeAndRunWithLogging( "imagex.exe", sCMD )
+			If iRetVal <> 0 then
+				oLogging.CreateEntry "ERROR - An Error Occured While Unmounting C:\Sources\Boot.wim to " & strBootMountDir, LogTypeError
+				iRetVal = 1
+				Exit Function
+			End If
+		Else		
+			'WimMount Is Not Installed So I'm Not Doing Anything
+			oLogging.CreateEntry "ERROR - WimMount Driver Is Not Installed", LogTypeError
+			iRetVal = 1
+			Exit Function
+		End If
+		
+		iRetVal = 0
+
+		Main = iRetVal
+	End Function
+End Class
+
+	</script>
+</job>
