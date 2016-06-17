@@ -1,5 +1,4 @@
 REM Based On https://blogs.msdn.microsoft.com/steverac/2013/09/13/osd-pre-stage-and-uefi-systems/
-
 xcopy %SYSTEMDRIVE%\Payload\Refresh\Boot\x64\EFI\* S:\EFI\* /cherkyfs 
 xcopy %SYSTEMDRIVE%\Payload\Refresh\Boot\LiteTouchPE_x64.wim C:\sources\* /cherkyfs
 rename C:\sources\LiteTouchPE_x64.wim boot.wim

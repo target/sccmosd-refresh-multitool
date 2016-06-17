@@ -1,5 +1,5 @@
 ﻿# Filename:      PrepareDisk.ps1
-# Version:       1.2
+# Version:       1.7
 # Description:   Formats the first fixed hard disk as a GPT or MBR disk type unless a "block file" is found or already using desired disk type
 # Author:        Kent Vareberg, Desktop and Hardware Engineering
 
@@ -15,20 +15,32 @@
     See the PARAMETERS and NOTES sections for more information.
 
 
+.Parameter Action
+    Default is "FormatFullDisk".  This parameter may specify also specify "FormatEfiPartitionOnly" to only format the EFI partition and assign a drive letter or "AssignEfiVolumeOnly" to just assign a drive letter.
+
 .Parameter BlockFiles
     Default is none.  Specify an array of one or more files that, if found, will block the disk format.  If no BlockFiles are specified then disk will always be formatted using specified BootDiskType.
 
 .Parameter BootDiskType
     Default is "GPT".  Options are "GPT" or "MBR".
 
+.Parameter DelaySecsAfterDiskPart
+    Default is 15 seconds.  This parameter causes a delay after executing DiskPart.exe, which is recommended per https://technet.microsoft.com/en-us/library/cc766465(v=ws.10).aspx.
+
 .Parameter ForceFormat
     Default is to only format the first fixed hard disk if NONE of the specified BlockFiles are found OR the first fixed hard disk doesn't match the BootDiskType.  This parameter will format the first fixed hard disk regardless of these two items.
-        
+       
 .Parameter LogFile
     Default is %SystemDrive%\Windows\Temp\<ScriptBaseName>.log
 
 .Parameter MaxLogSizeBytes
     Default is 5 MB; specify 0 to let grow indefinitely.
+
+.Parameter VolumeLetterGptEfi
+    Default is "S".  Specify only a drive letter from "C" through "Z", inclusive, and without quotes or a colon.  This is only used when -BootDiskType is set to "GPT".  This temporary volume letter is assigned to the EFI partition while still in WinPE.  After a reboot the EFI partition will have no volume letter.
+
+.Parameter VolumeLetterWindows
+    Default is "C".  Specify only a drive letter from "C" through "Z", inclusive, and without quotes or a colon.  This volume letter is where Windows should be installed.
 
 
 .Example
@@ -40,6 +52,16 @@
     This example formats the first fixed hard disk to GPT unless the disk type is already GPT AND either of the BlockFiles are found:
 
     PrepareDisk.ps1 -BootDiskType GPT -BlockFiles C:\_SMSTaskSequence\tsenv.dat,c:\temp\testfile.txt
+
+.Example
+    This example formats the EFI partition and the assigns the -VolumeLetterGptEfi drive letter S:
+
+    PrepareDisk.ps1 -Action FormatEfiPartitionOnly
+
+.Example
+    This example assigns drive letter P: to the EFI partition volume without formatting:
+
+    PrepareDisk.ps1 -Action AssignEfiVolumeOnly -VolumeLetterGptEfi P
 
 
 .Notes
@@ -54,7 +76,8 @@
     -The format will fail if trying to format the currently-booted hard disk unless it's a RAM disk (WinPE).
     
     -The return code will be:
-        0: Success - zero warnings and zero errors were encountered and all settings set successfully
+       -1: Success - zero warnings and zero errors were encountered and no settings were effectively changed
+        0: Success - zero warnings and zero errors were encountered and one or more settings were effectively changed
         1: Warning - one or more warnings and zero errors were encountered
         2: Error   - one or more errors were encountered
 #>
@@ -64,12 +87,19 @@
 ### Get the default parameters ###
 ##################################
 Param(
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("FormatFullDisk","FormatEfiPartitionOnly","AssignEfiVolumeOnly")] 
+    [string]$Action="FormatFullDisk",
+
+    [Parameter(Mandatory=$false)]
+    [string[]]$BlockFiles = @(),
+
     [Parameter(Mandatory=$False)]
     [ValidateSet("GPT","MBR")] 
     [string]$BootDiskType ="GPT",
 
     [Parameter(Mandatory=$false)]
-    [string[]]$BlockFiles = @(),
+    [int]$DelaySecsAfterDiskPart=15,
 
     [Parameter(Mandatory=$false)]
     [switch]$ForceFormat,
@@ -78,7 +108,15 @@ Param(
     [string]$LogFile = "<Default>",
 
     [Parameter(Mandatory=$false)]
-    [int]$MaxLogSizeBytes=(5 * 1024 * 1024)
+    [int]$MaxLogSizeBytes=(5 * 1024 * 1024),
+
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z")] 
+    [char]$VolumeLetterGptEfi ="S",
+
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z")] 
+    [char]$VolumeLetterWindows ="C"
 )
 
 
@@ -121,7 +159,10 @@ Function TestPathQuiet
 {
     Param(
         [Parameter(Mandatory=$True,Position=1)]
-        [string]$DirOrFile = "<Default Dir or File>"
+        [string]$DirOrFile = "<Default Dir or File>",
+
+        [Parameter(Mandatory=$false,Position=2)]
+        [int]$Timeout = 0
     )
 
     if ($DirOrFile -ieq "<Default Dir or File>" -or $DirOrFile -eq "")
@@ -130,9 +171,23 @@ Function TestPathQuiet
         return $false
     }
 
-    $bTestPathRslt = $null
-    try { $bTestPathRslt = test-pathex $DirOrFile -ErrorAction Stop }
-    catch { $bTestPathRslt = $false }
+    $bTestPathRslt = $false             # Default value
+    $dtTimerStart = (get-date)          # Max time for testing path
+
+    # Wait up to timeout value for path to exist
+    while($true)
+    {
+        # Test if path exists
+        try { $bTestPathRslt = test-pathex $DirOrFile -ErrorAction Stop }
+        catch { $bTestPathRslt = $false }
+
+
+        # Determine if path exists or timeout was exceeded
+        $iSecondsElapsed = [int](New-TimeSpan $dtTimerStart $(get-date)).TotalSeconds
+
+        if ($bTestPathRslt -eq $true -or $iSecondsElapsed -ge $Timeout) { break }
+        sleep 1     # Sleep 1 second
+    }
 
     return $bTestPathRslt
 }
@@ -397,9 +452,9 @@ Function Execute-Command
 }
 
 
-###################################################
-### Function to test a path and suppress errors ###
-###################################################
+#####################################################
+### Function to determine if a disk is MBR or GPT ###
+#####################################################
 Function GetHardDiskType
 {
     Param(
@@ -410,7 +465,10 @@ Function GetHardDiskType
         [int]$DiskIndex = 0,
 
         [Parameter(Mandatory=$False,Position=3)]
-        [hashtable]$DiskPartExitCodeLookupHashtable = @{}
+        [hashtable]$DiskPartExitCodeLookupHashtable = @{},
+
+        [Parameter(Mandatory=$false,Position=4)]
+        [int]$DelaySecsAfterDiskPart = 15
     )
 
     $strDiskType = "<Default>"   # Default
@@ -422,8 +480,15 @@ Function GetHardDiskType
 
     # Execute DiskPart.exe to get disk info and determine type
     $objDiskPartRslt = Execute-Command -commandTitle "DiskPart" -commandPath $DiskPartPath -commandArguments "/s $strDiskPartListDiskFile"
+    
     $arrDiskPartOutput = $objDiskPartRslt.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
     $iDiskPartExitCode = $objDiskPartRslt.ExitCode
+
+    # Output DiskPart script results to file
+    $strDiskPartListDiskResultsFile = "$env:TEMP\DiskPart_ListDisk_Results.txt"
+    $arrDiskPartOutput | Out-File $strDiskPartListDiskResultsFile -Encoding ascii -Force
+
+    sleep -Seconds $DelaySecsAfterDiskPart
     
     # Resolve the DiskPart exit code to a description
     $strDiskPartExitCodeDesc = $DiskPartExitCodeLookupHashtable.$iDiskPartExitCode
@@ -463,6 +528,74 @@ Function GetHardDiskType
         DiskPartExitCode = $iDiskPartExitCode
         DiskPartExitCodeDesc = $strDiskPartExitCodeDesc
         DiskType = $strDiskType
+    }
+}
+
+
+##################################################################
+### Function to get the System partition index (on a GPT disk) ###
+##################################################################
+Function GetSystemPartitionIndex
+{
+    Param(
+        [Parameter(Mandatory=$True,Position=1)]
+        [string]$DiskPartPath = "",
+        
+        [Parameter(Mandatory=$True,Position=2)]
+        [int]$DiskIndex = 0,
+
+        [Parameter(Mandatory=$False,Position=3)]
+        [hashtable]$DiskPartExitCodeLookupHashtable = @{},
+
+        [Parameter(Mandatory=$false,Position=4)]
+        [int]$DelaySecsAfterDiskPart = 15
+    )
+
+    $strPartIndex = "<Default>"   # Default
+
+
+    # DiskPart file content
+    $strDiskPartListPartFile = "$env:TEMP\DiskPart_ListPart.txt"
+    "select disk $DiskIndex`r`nlist part" | Out-File $strDiskPartListPartFile -Encoding ascii -Force
+
+    # Execute DiskPart.exe to get disk info and determine type
+    $objDiskPartRslt = Execute-Command -commandTitle "DiskPart" -commandPath $DiskPartPath -commandArguments "/s $strDiskPartListPartFile"
+    $arrDiskPartOutput = $objDiskPartRslt.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
+    $iDiskPartExitCode = $objDiskPartRslt.ExitCode
+
+    # Output DiskPart script results to file
+    $strDiskPartListPartResultsFile = "$env:TEMP\DiskPart_ListPart_Results.txt"
+    $arrDiskPartOutput | Out-File $strDiskPartListPartResultsFile -Encoding ascii -Force
+
+    sleep -Seconds $DelaySecsAfterDiskPart
+    
+    # Resolve the DiskPart exit code to a description
+    $strDiskPartExitCodeDesc = $DiskPartExitCodeLookupHashtable.$iDiskPartExitCode
+
+    if ($strDiskPartExitCodeDesc -eq $null -or $strDiskPartExitCodeDesc.trim() -eq "")
+    {
+        $strDiskPartExitCodeDesc = "Unknown"
+    }
+
+    # Get a MatchInfo object based on a RegEx to find the first "System" partition
+    $miDiskPartFirstSystemPart = $arrDiskPartOutput | select-string "^\s*Partition\s+[1-9][0-9]*\s+System\s+" | select -first 1
+
+    # Check DiskPart results
+    if ($miDiskPartFirstSystemPart -eq $null)
+    {
+        # Partition not found
+        $strPartIndex = "<Not Found>"
+    }
+    else
+    {
+        # Partition found, extract partition number
+        $strPartIndex = (($miDiskPartFirstSystemPart.matches.value) -split " " | where {$_.trim() -ne ""})[1]
+    }
+
+    return [pscustomobject]@{
+        DiskPartExitCode = $iDiskPartExitCode
+        DiskPartExitCodeDesc = $strDiskPartExitCodeDesc
+        SystemPartitionIndex = $strPartIndex
     }
 }
 
@@ -522,8 +655,9 @@ Function GetDiskPartitionVolumeMappings
 ############
 ### Main ###
 ############
-$iOverallErrorCt   = 0  # Track number of errors
-$iOverallWarningCt = 0  # Track number of warnings
+$iSettingsChangedCount = 0  # Use to track number of settings effectively changed
+$iOverallErrorCt       = 0  # Track number of errors
+$iOverallWarningCt     = 0  # Track number of warnings
 
 # Generate a GUID and use the prefix to track related log entries
 $strGuidPrefix = (([string][guid]::NewGuid()) -split "-")[0]
@@ -539,6 +673,20 @@ else
     $strLogfile = $LogFile
 }
 
+# Make sure the log folder exists
+$strLogFileDir = [System.IO.Path]::GetDirectoryName($strLogfile)
+if ((TestPathQuiet -DirOrFile $strLogFileDir) -eq $false)
+{
+    # Create the log folder
+    new-item -Path $strLogFileDir -ItemType Directory -Force | out-null
+
+    # Verify it was created
+    if ((TestPathQuiet -DirOrFile $strLogFileDir) -eq $false)
+    {
+        write-host "$((get-date).tostring()): WARNING: Log folder not created: $strLogFileDir" -ForegroundColor Yellow
+        $iOverallWarningCt++
+    }
+}
 
 # Import the SCCM-compatible logging module
 $strModuleFile = "$([System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Definition))\Logging.psm1"
@@ -549,7 +697,7 @@ catch {}
 
 if ([bool]$ImportRslt -ne $true)
 {
-    write-host "$($strGuidPrefix): WARNING: Logging module not imported" -ForegroundColor Yellow
+    write-host "$((get-date).tostring()): WARNING: Logging module not imported" -ForegroundColor Yellow
     $iOverallWarningCt++
 }
 
@@ -568,16 +716,6 @@ if ($strUsername -ieq ($env:COMPUTERNAME + "$"))
 # Check if running as a local Admin
 $bIsAdmin = IsAdmin
 
-if ($bIsAdmin -eq $True)
-{
-    $strLogType = "Informational"
-}
-else
-{
-    $iOverallErrorCt++
-    $strLogType = "Error"
-} 
-
 # Get computer name
 $ComputerName = $env:COMPUTERNAME.ToUpper()
 
@@ -588,40 +726,97 @@ $strLastBootTime = get-date ([System.Management.ManagementDateTimeconverter]::To
 $strThisScript = $MyInvocation.MyCommand.Definition
 $strThisScriptPath = [System.IO.Path]::GetDirectoryName($strThisScript)
 
-$BootDiskType = $BootDiskType.ToUpper()
+# Get computer manufacturer and model
+$objWmiComputerSystem = $null
+try { $objWmiComputerSystem = @(gwmi -Class Win32_ComputerSystem -ErrorAction Stop) }
+catch {}
+
+if ($objWmiComputerSystem -eq $null)
+{
+    $strComputerManufacturer = "<Unknown>"
+    $strComputerManufacturer = "<Unknown>"
+}
+else
+{
+    $strComputerManufacturer = $objWmiComputerSystem.Manufacturer
+    $strComputerModel        = $objWmiComputerSystem.Model
+}
+
+# Get current computer BIOS version
+$objWmiBios = $null
+try { $objWmiBios = @(gwmi -Class Win32_BIOS -ErrorAction Stop) }
+catch {}
+
+if ($objWmiBios -eq $null)
+{
+    $strComputerBiosVersion = "<Unknown>"
+}
+else
+{
+    $strComputerBiosVersion = $objWmiBios.SMBIOSBIOSVersion
+}
 
 
 #----------------------------#
 # Update log with basic info #
 #----------------------------#
+$BootDiskType = $BootDiskType.ToUpper()
+$strVolumeLetterGptEfi  = "$(([string]$VolumeLetterGptEfi).ToUpper()):"   # Convert to uppercase string and append a colon
+$strVolumeLetterWindows = "$(([string]$VolumeLetterWindows).ToUpper()):"  # Convert to uppercase string and append a colon
+
+
 write-host "$((get-date).tostring()): Log File: $strLogfile"
+
+# Ensure only runs on Dell models, excluding the Dell R7910
+$strLogTypeComputerMfgModel = "Informational"
+write-host "$((get-date).tostring()): Computer Manufacturer: $strComputerManufacturer"
+write-host "$((get-date).tostring()): Computer Model: $strComputerModel"
+write-host "$((get-date).tostring()): Current BIOS Version: $strComputerBiosVersion"
 write-host "$((get-date).tostring()): Computer Name: $ComputerName"
 write-host "$((get-date).tostring()): User Name: $strUsername"
 
+# Ensure user is an Admin
 if ($bIsAdmin -eq $True)
 {
     write-host "$((get-date).tostring()): User is an Admin: $bIsAdmin"
+    $strLogTypeIsAdmin = "Informational"
 }
 else
 {
     write-host "$((get-date).tostring()): ERROR: User is an Admin: $bIsAdmin" -ForegroundColor Red
+    $iOverallErrorCt++
+    $strLogTypeIsAdmin = "Error"
 } 
 
 write-host "$((get-date).tostring()): Last Boot Time: $strLastBootTime"
 write-host "$((get-date).tostring()): Log Max Size (bytes): $MaxLogSizeBytes"
-write-host "$((get-date).tostring()): BootDiskType: $BootDiskType"
-write-host "$((get-date).tostring()): BlockFiles ($(@($BlockFiles).Count)): $([string]::Join(", ", $BlockFiles))"
-write-host "$((get-date).tostring()): ForceFormat: $ForceFormat"
 
+write-host "$((get-date).tostring()): Action: $Action"
+write-host "$((get-date).tostring()): BlockFiles ($(@($BlockFiles).Count)): $([string]::Join(", ", $BlockFiles))"
+write-host "$((get-date).tostring()): BootDiskType: $BootDiskType"
+write-host "$((get-date).tostring()): DelaySecsAfterDiskPart: $DelaySecsAfterDiskPart"
+write-host "$((get-date).tostring()): ForceFormat: $ForceFormat"
+if ($BootDiskType -ieq "GPT") { write-host "$((get-date).tostring()): VolumeLetterGptEfi: $strVolumeLetterGptEfi" }
+write-host "$((get-date).tostring()): VolumeLetterWindows: $strVolumeLetterWindows"
+
+# Update log
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Log file: $strLogfile"
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Computer Manufacturer: $strComputerManufacturer"
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Computer Model: $strComputerModel"
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Current BIOS Version: $strComputerBiosVersion"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Computer Name: $ComputerName"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): User Name: $strUsername"
-write-log -FilePath $strLogfile -Type $strLogType   -Message "$($strGuidPrefix): User is an Admin: $bIsAdmin"
+write-log -FilePath $strLogfile -Type $strLogTypeIsAdmin -Message "$($strGuidPrefix): User is an Admin: $bIsAdmin"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Last Boot Time: $strLastBootTime"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Log Max Size (bytes): $MaxLogSizeBytes"
-write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): BootDiskType: $BootDiskType"
+
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Action: $Action"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): BlockFiles ($(@($BlockFiles).Count)): $([string]::Join(", ", $BlockFiles))"
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): BootDiskType: $BootDiskType"
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): DelaySecsAfterDiskPart: $DelaySecsAfterDiskPart"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ForceFormat: $ForceFormat"
+if ($BootDiskType -ieq "GPT") { write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): VolumeLetterGptEfi: $strVolumeLetterGptEfi" }
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): VolumeLetterWindows: $strVolumeLetterWindows"
 
 
 #-----------------------------------------#
@@ -693,8 +888,8 @@ foreach ($objMiDiskPartExitCodeLookup in $arrMiDiskPartExitCodeLookup)
 $strDiskPartFormatMbrContent = @"
 clean
 create partition primary
-format quick fs=ntfs label="Windows"
-assign letter="C"
+format quick fs=ntfs label="Windows" override
+assign letter="$strVolumeLetterWindows"
 "@
 
 $strDiskPartFormatGptContent = @"
@@ -702,23 +897,53 @@ clean
 convert gpt
 create partition efi size=512
 format quick fs=fat32 label="System"
-assign letter="S"
+assign letter="$strVolumeLetterGptEfi"
 create partition msr size=128
 create partition primary
 format quick fs=ntfs label="Windows"
-assign letter="C"
+assign letter="$strVolumeLetterWindows"
 "@
 
+$strDiskPartFormatEfiPartContent = @"
+format quick fs=fat32 label="System"
+remove letter="$strVolumeLetterGptEfi" noerr
+assign letter="$strVolumeLetterGptEfi"
+"@
+
+$strDiskPartAssignEfiVolContent = @"
+remove letter="$strVolumeLetterGptEfi" noerr
+assign letter="$strVolumeLetterGptEfi"
+"@
+
+
 # Select respective here-string based on option
-if ($BootDiskType -ieq "MBR")
+switch ($Action)
 {
-    # Use MBR
-    $strDiskPartFormatContent = $strDiskPartFormatMbrContent
-}
-else
-{
-    # Use GPT
-    $strDiskPartFormatContent = $strDiskPartFormatGptContent
+    "FormatFullDisk"
+    {
+        if ($BootDiskType -ieq "MBR")
+        {
+            # Format full disk as MBR
+            $strDiskPartFormatContent = $strDiskPartFormatMbrContent
+        }
+        else
+        {
+            # Format full disk as GPT
+            $strDiskPartFormatContent = $strDiskPartFormatGptContent
+        }
+    }
+    
+    "FormatEfiPartitionOnly"
+    {
+        # Format GPT EFI system partition
+        $strDiskPartFormatContent = $strDiskPartFormatEfiPartContent
+    }
+
+    "AssignEfiVolumeOnly"
+    {
+        # Assign drive letter to GPT EFI system partition without format
+        $strDiskPartFormatContent = $strDiskPartAssignEfiVolContent
+    }
 }
 
 
@@ -749,19 +974,24 @@ else
     # String to hold DiskPart format script drive letter re-mappings
     $strDiskPartFormatDriveLetterRemappings = ""
 
+    # Create an array of drive letters from C: through Z:
+    $arrDriveLettersValid = @(); for ($i=67; $i -le 90; $i++) { $arrDriveLettersValid += "$([char]$i):" }
 
     # Get drive letters in-use
     $arrDriveLettersInUse = $null
     try { $arrDriveLettersInUse = @(gwmi win32_logicaldisk | Select-Object -ExpandProperty Name | sort) }
     catch {}
 
+    $strDriveLettersInUse = [string]::join(" ", $arrDriveLettersInUse)
+    write-host "$((get-date).tostring()): Drive letters in-use ($($arrDriveLettersInUse.count)): $strDriveLettersInUse"
+    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Drive letters in-use ($($arrDriveLettersInUse.count)): $strDriveLettersInUse"
+
+
+    # Get drive letters not in-use
     $lstDriveLettersNotInUse = [System.Collections.Generic.List[System.Object]]($arrDriveLettersValid | where {$_ -notin $arrDriveLettersInUse})  # Use a List to help with removing elements later
-    write-host "$((get-date).tostring()): Drive letters in-use: $([string]::join(" ", $arrDriveLettersInUse))"
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Drive letters in-use: $([string]::join(" ", $arrDriveLettersInUse))"
-
-
-    # Create an array of drive letters from C: through Z:
-    $arrDriveLettersValid = @(); for ($i=67; $i -le 90; $i++) { $arrDriveLettersValid += "$([char]$i):" }
+    $strDriveLettersNotInUse = [string]::join(" ", $lstDriveLettersNotInUse)
+    write-host "$((get-date).tostring()): Drive letters not in-use ($($lstDriveLettersNotInUse.count)): $strDriveLettersNotInUse"
+    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Drive letters not in-use ($($lstDriveLettersNotInUse.count)): $strDriveLettersNotInUse"
 
 
     # Get all disks with respective partitions and volumes        
@@ -858,7 +1088,7 @@ else
     # Get the original type of the first hard disk #
     #----------------------------------------------#
     # Get DiskPart info
-    $objFirstDiskTypeOriginal = GetHardDiskType -DiskPartPath $strDiskPartExe -DiskIndex $iFirstDiskIndex -DiskPartExitCodeLookupHashtable $htDiskPartExitCodeLookup
+    $objFirstDiskTypeOriginal = GetHardDiskType -DiskPartPath $strDiskPartExe -DiskIndex $iFirstDiskIndex -DiskPartExitCodeLookupHashtable $htDiskPartExitCodeLookup -DelaySecsAfterDiskPart $DelaySecsAfterDiskPart
 
     # Get the DiskPart result
     $iDiskPartExitCodeOriginal = $objFirstDiskTypeOriginal.DiskPartExitCode
@@ -887,6 +1117,52 @@ else
         write-host "$((get-date).tostring()): ERROR: `"Disk $iFirstDiskIndex`" original type: $strDiskTypeOriginal" -ForegroundColor Red
         write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: `"Disk $iFirstDiskIndex`" original type: $strDiskTypeOriginal"
         $iOverallErrorCt++
+    }
+
+    
+    #-----------------------------------#
+    # Determine the EFI partition index #
+    #-----------------------------------#
+    $objEfiPartIndex = GetSystemPartitionIndex -DiskPartPath $strDiskPartExe -DiskIndex $iFirstDiskIndex -DiskPartExitCodeLookupHashtable $htDiskPartExitCodeLookup -DelaySecsAfterDiskPart $DelaySecsAfterDiskPart
+    $strEfiPartIndex = $objEfiPartIndex.SystemPartitionIndex
+
+    # Get the DiskPart result
+    $iDiskPartEfiPartIndexExitCode = $objEfiPartIndex.DiskPartExitCode
+    if ($iDiskPartEfiPartIndexExitCode -eq 0)
+    {
+        write-host "$((get-date).tostring()): DiskPart List Part exit code: $iDiskPartEfiPartIndexExitCode [$($objEfiPartIndex.DiskPartExitCodeDesc)]"
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): DiskPart List Part exit code: $iDiskPartEfiPartIndexExitCode [$($objEfiPartIndex.DiskPartExitCodeDesc)]"
+    }
+    else
+    {
+        write-host "$((get-date).tostring()): ERROR: DiskPart List Part exit code: $iDiskPartEfiPartIndexExitCode [$($objEfiPartIndex.DiskPartExitCodeDesc)]" -ForegroundColor Red
+        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: DiskPart List Part exit code: $iDiskPartEfiPartIndexExitCode [$($objEfiPartIndex.DiskPartExitCodeDesc)]"
+        $iOverallErrorCt++
+    }
+
+    # Check if EFI partition found
+    if ($strEfiPartIndex -ieq "<Not Found>")
+    {
+        # EFI partition not found
+        if ($strDiskTypeOriginal -ne $null -and $strDiskTypeOriginal -ieq "GPT")
+        {
+            # Count as warning if GPT disk
+            write-host "$((get-date).tostring()): WARNING: `"Disk $iFirstDiskIndex`" EFI partition index: $strEfiPartIndex" -ForegroundColor Yellow
+            write-log -FilePath $strLogfile -Type Warning -Message "$($strGuidPrefix): WARNING: `"Disk $iFirstDiskIndex`" EFI partition index: $strEfiPartIndex"
+            $iOverallWarningCt++
+        }
+        else
+        {
+            # Don't count as warning
+            write-host "$((get-date).tostring()): `"Disk $iFirstDiskIndex`" EFI partition index: $strEfiPartIndex"
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): `"Disk $iFirstDiskIndex`" EFI partition index: $strEfiPartIndex"
+        }
+    }
+    else
+    {
+        # EFI partition found
+        write-host "$((get-date).tostring()): `"Disk $iFirstDiskIndex`" EFI partition index: $strEfiPartIndex"
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): `"Disk $iFirstDiskIndex`" EFI partition index: $strEfiPartIndex"
     }
 
 
@@ -925,23 +1201,49 @@ else
     }
 
 
-    #--------------------------------------------------------------------------------------------------------------------------------#
-    # Format the disk if -ForceFormat specified OR if the original disk type not already set OR if the block files aren't accessible #
-    #--------------------------------------------------------------------------------------------------------------------------------#
-    if ($ForceFormat -eq $true -or $strDiskTypeOriginal -ine $BootDiskType -or $bAnyBlockFileFound -eq $false)
+    #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+    # Format the disk if -ForceFormat specified OR if the original disk type not already set OR if the block files aren't accessible OR Action is "FormatEfiPartitionOnly" / "AssignEfiVolumeOnly" #
+    #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+    if ($ForceFormat -eq $true -or $strDiskTypeOriginal -ine $BootDiskType -or $bAnyBlockFileFound -eq $false -or $Action -ieq "FormatEfiPartitionOnly" -or $Action -ieq "AssignEfiVolumeOnly")
     {
-        write-host "$((get-date).tostring()): Formatting `"Disk $iFirstDiskIndex`""
-        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Formatting `"Disk $iFirstDiskIndex`""
+        # If updating the EFI partition
+        if ($Action -ieq "FormatEfiPartitionOnly" -or $Action -ieq "AssignEfiVolumeOnly")
+        {
+            # Format/update EFI partition
+            write-host "$((get-date).tostring()): Updating `"Disk $iFirstDiskIndex`" EFI partition: $strEfiPartIndex"
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Updating `"Disk $iFirstDiskIndex`" EFI partition: $strEfiPartIndex"
 
-        # Create DiskPart text file to format the disk
-        $strDiskPartFormatDiskFile = "$env:TEMP\DiskPart_FormatDisk.txt"
-        $strDiskPartFormatContent = $strDiskPartFormatDriveLetterRemappings + "select disk $iFirstDiskIndex`r`n" + $strDiskPartFormatContent       # Prepend the drive letter re-mappings plus the first hard disk index
-        $strDiskPartFormatContent | Out-File $strDiskPartFormatDiskFile -Encoding ascii -Force
+            # Create DiskPart text file to format the disk
+            $strDiskPartFormatDiskFile = "$env:TEMP\DiskPart_UpdateEfi.txt"
+            $strDiskPartFormatDiskResultsFile = "$env:TEMP\DiskPart_UpdateEfi_Results.txt"
+            $strDiskPartFormatContent = $strDiskPartFormatDriveLetterRemappings + "select disk $iFirstDiskIndex`r`n" + "select part $strEfiPartIndex`r`n" + $strDiskPartFormatContent       # Prepend the drive letter and partition re-mappings plus the first hard disk index
+            $strDiskPartFormatContent | Out-File $strDiskPartFormatDiskFile -Encoding ascii -Force
+        }
+        else
+        {
+            # Not formatting EFI volume
+            write-host "$((get-date).tostring()): Formatting `"Disk $iFirstDiskIndex`""
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Formatting `"Disk $iFirstDiskIndex`""
+
+            # Create DiskPart text file to format the disk
+            $strDiskPartFormatDiskFile = "$env:TEMP\DiskPart_FormatDisk.txt"
+            $strDiskPartFormatDiskResultsFile = "$env:TEMP\DiskPart_FormatDisk_Results.txt"
+            $strDiskPartFormatContent = $strDiskPartFormatDriveLetterRemappings + "select disk $iFirstDiskIndex`r`n" + $strDiskPartFormatContent       # Prepend the drive letter re-mappings plus the first hard disk index
+            $strDiskPartFormatContent | Out-File $strDiskPartFormatDiskFile -Encoding ascii -Force
+        }
 
         # Execute DiskPart.exe to format the disk
         $objDiskPartRslt = Execute-Command -commandTitle "DiskPart" -commandPath $strDiskPartExe -commandArguments "/s $strDiskPartFormatDiskFile"
         $arrDiskPartOutput = $objDiskPartRslt.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
         $iDiskPartExitCode = $objDiskPartRslt.ExitCode
+
+        # Output DiskPart script results to file
+        $arrDiskPartOutput | Out-File $strDiskPartFormatDiskResultsFile -Encoding ascii -Force
+
+        sleep -Seconds $DelaySecsAfterDiskPart
+
+        # Change only made if DiskPart executes
+        $iSettingsChangedCount++
     
         # Resolve the DiskPart exit code to a description
         $strDiskPartExitCodeDesc = $htDiskPartExitCodeLookup.$iDiskPartExitCode
@@ -954,12 +1256,12 @@ else
         # Get the DiskPart result
         if ($iDiskPartExitCode -eq 0)
         {
-            write-host "$((get-date).tostring()): DiskPart Format Disk exit code: $iDiskPartExitCode [$strDiskPartExitCodeDesc]"
+            write-host "$((get-date).tostring()): DiskPart Format/Update exit code: $iDiskPartExitCode [$strDiskPartExitCodeDesc]"
             write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): DiskPart Format Disk exit code: $iDiskPartExitCode [$strDiskPartExitCodeDesc]"
         }
         else
         {
-            write-host "$((get-date).tostring()): ERROR: DiskPart Format Disk exit code: $iDiskPartExitCode [$strDiskPartExitCodeDesc]" -ForegroundColor Red
+            write-host "$((get-date).tostring()): ERROR: DiskPart Format/Update exit code: $iDiskPartExitCode [$strDiskPartExitCodeDesc]" -ForegroundColor Red
             write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: DiskPart Format Disk exit code: $iDiskPartExitCode [$strDiskPartExitCodeDesc]"
             $iOverallErrorCt++
         }
@@ -1007,54 +1309,83 @@ else
         # Get all disks with respective partitions and volumes after the format
         $arrobjDiskPartVolMapping2 = GetDiskPartitionVolumeMappings
         $arrFirstDiskVolumes2 = @($arrobjDiskPartVolMapping2 | where {$_.DiskIndex -eq $iFirstDiskIndex} | select -ExpandProperty VolumeName | sort)
-        
-        # Convert arrays to strings for comparison
         $strFirstDiskVolumes2 = [string]::join(" ", ($arrFirstDiskVolumes2 | sort -Unique)).toupper().trim()
-        $strDriveLettersInDiskPartScript = [string]::join(" ", ($arrDriveLettersInDiskPartScript | sort -Unique)).toupper().trim()
 
-        # Compare strings, which should be identical if DiskPart format script executed properly
-        if ($strFirstDiskVolumes2 -ieq $strDriveLettersInDiskPartScript)
+        # Check if just updating EFI partition
+        if ($Action -ieq "FormatEfiPartitionOnly" -or $Action -ieq "AssignEfiVolumeOnly")
         {
-            write-host "$((get-date).tostring()): `"Disk $iFirstDiskIndex`" volumes match DiskPart format disk script: $strFirstDiskVolumes2"
-            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): `"Disk $iFirstDiskIndex`" volumes match DiskPart format disk script: $strFirstDiskVolumes2"
-        }
-        else
-        {
-            write-host "$((get-date).tostring()): ERROR: `"Disk $iFirstDiskIndex`" volumes don't match DiskPart format disk script: $strFirstDiskVolumes2" -ForegroundColor Red
-            write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: `"Disk $iFirstDiskIndex`" volumes don't match DiskPart format disk script: $strFirstDiskVolumes2"
-            $iOverallErrorCt++
-        }
-
-
-        #----------------------------------------------------#
-        # Verify no files exist on C: since it was formatted #
-        #----------------------------------------------------#
-        $strFirstDiskVolumePath = "C:"
-
-        if ((TestPathQuiet -DirOrFile $strFirstDiskVolumePath) -eq $true)
-        {
-            # C: found, check if any folders or files exist, to verify disk was formatted
-            $iFirstDiskVolFileCt = @(gci $strFirstDiskVolumePath -Force).Count
-
-            if ($iFirstDiskVolFileCt -eq 0)
+            # Make sure EFI part drive letter found in list of volumes
+            if ($strVolumeLetterGptEfi -in $arrFirstDiskVolumes2)
             {
-                # No folders/files
-                write-host "$((get-date).tostring()): $iFirstDiskVolFileCt Folders/Files found directly in $strFirstDiskVolumePath"
-                write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): $iFirstDiskVolFileCt Folders/Files found directly in $strFirstDiskVolumePath"
+                write-host "$((get-date).tostring()): EFI volume `"$strVolumeLetterGptEfi`" found on `"Disk $iFirstDiskIndex`" volumes list: $strFirstDiskVolumes2"
+                write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): EFI volume `"$strVolumeLetterGptEfi`" found on `"Disk $iFirstDiskIndex`" volumes list: $strFirstDiskVolumes2"
             }
             else
             {
-                # One or more folders/files
-                write-host "$((get-date).tostring()): ERROR: $iFirstDiskVolFileCt Folders/Files still found directly in $strFirstDiskVolumePath" -ForegroundColor Red
-                write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: $iFirstDiskVolFileCt Folders/Files still found directly in $strFirstDiskVolumePath"
+                write-host "$((get-date).tostring()): ERROR: EFI volume `"$strVolumeLetterGptEfi`" not found on `"Disk $iFirstDiskIndex`" volumes list: $strFirstDiskVolumes2" -ForegroundColor Red
+                write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: EFI volume `"$strVolumeLetterGptEfi`" not found on `"Disk $iFirstDiskIndex`" volumes list: $strFirstDiskVolumes2"
                 $iOverallErrorCt++
             }
         }
         else
         {
-            # C: not found
-            write-host "$((get-date).tostring()): ERROR: $strFirstDiskVolumePath not found" -ForegroundColor Red
-            write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: $strFirstDiskVolumePath not found"
+            # Convert arrays to strings for comparison
+            $strDriveLettersInDiskPartScript = [string]::join(" ", ($arrDriveLettersInDiskPartScript | sort -Unique)).toupper().trim()
+
+            # Compare strings, which should be identical if DiskPart format script executed properly
+            if ($strFirstDiskVolumes2 -ieq $strDriveLettersInDiskPartScript)
+            {
+                write-host "$((get-date).tostring()): `"Disk $iFirstDiskIndex`" volumes match DiskPart format disk script: $strFirstDiskVolumes2"
+                write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): `"Disk $iFirstDiskIndex`" volumes match DiskPart format disk script: $strFirstDiskVolumes2"
+            }
+            else
+            {
+                write-host "$((get-date).tostring()): ERROR: `"Disk $iFirstDiskIndex`" volumes don't match DiskPart format disk script: $strFirstDiskVolumes2" -ForegroundColor Red
+                write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: `"Disk $iFirstDiskIndex`" volumes don't match DiskPart format disk script: $strFirstDiskVolumes2"
+                $iOverallErrorCt++
+            }
+        }
+
+
+        #-----------------------------------------------------------------------#
+        # If formatting, verify no files exist on volume since it was formatted #
+        #-----------------------------------------------------------------------#
+        if ($Action -ieq "FormatEfiPartitionOnly" -or $Action -ieq "AssignEfiVolumeOnly")
+        {
+            # Use EFI drive letter
+            $strVolumeContentCheck = $strVolumeLetterGptEfi
+        }
+        else
+        {
+            # Use Windows drive letter
+            $strVolumeContentCheck = $strVolumeLetterWindows
+        }
+
+        if ((TestPathQuiet -DirOrFile $strVolumeContentCheck -Timeout 60) -eq $true)
+        {
+            # Found, check if any folders or files exist
+            $iVolumeContentCheckObjectCt = @(gci $strVolumeContentCheck -Force).Count
+
+            # Check if any files exist
+            if ($iVolumeContentCheckObjectCt -eq 0 -or $Action -ieq "AssignEfiVolumeOnly")
+            {
+                # No folders/files or not formatting
+                write-host "$((get-date).tostring()): $iVolumeContentCheckObjectCt Folders/Files found directly in $strVolumeContentCheck"
+                write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): $iVolumeContentCheckObjectCt Folders/Files found directly in $strVolumeContentCheck"
+            }
+            else
+            {
+                # One or more folders/files
+                write-host "$((get-date).tostring()): ERROR: $iVolumeContentCheckObjectCt Folders/Files still found directly in $strVolumeContentCheck" -ForegroundColor Red
+                write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: $iVolumeContentCheckObjectCt Folders/Files still found directly in $strVolumeContentCheck"
+                $iOverallErrorCt++
+            }
+        }
+        else
+        {
+            # Not found
+            write-host "$((get-date).tostring()): ERROR: $strVolumeContentCheck not found" -ForegroundColor Red
+            write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: $strVolumeContentCheck not found"
             $iOverallErrorCt++
         }
     }
@@ -1096,7 +1427,18 @@ write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix):
 
 if ($iOverallErrorCt -eq 0 -and $iOverallWarningCt -eq 0)
 {
-    $iExitCode = 0
+    # Check if any values were changed
+    if ($iSettingsChangedCount -eq 0)
+    {
+        # No changes and no errors or warnings
+        $iExitCode = -1
+    }
+    else
+    {
+        # One or more changes and no errors or warnings
+        $iExitCode = 0
+    }
+
     write-host "`n$((get-date).tostring()): Script finished successfully (exit code: $iExitCode)"
     write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Script finished successfully (exit code: $iExitCode)"
 }

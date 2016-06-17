@@ -1,7 +1,7 @@
 ﻿# Filename:      Set-DellBiosBootSettings.ps1
-# Version:       1.0
+# Version:       1.7
 # Description:   Sets the BIOS type and boot settings for supported Dell computers
-# Author:        Kent Vareberg, Desktop and Hardware Engineering
+# Author:        Kent Vareberg, Target Corporation
 
 
 <#
@@ -94,6 +94,8 @@
     -This script must be executed from an elevated PowerShell process.
 
     -The Logging.psm1 module must be in the same folder as this script to generate a CMTrace-compatible log file.
+
+    -This script will only execute on Dell computers, excluding: Precision Rack 7910.
     
     -HAPI (Hardware API) is required.  If not pre-installed, HAPI will be auto-installed and removed for each CCTK execution, which slows down the script. 
     
@@ -101,14 +103,15 @@
 
     -Boot devices that don't match filters will remain in their respective order AFTER the boot devices that match the filters.
     
-    -Boot devices that match filters or from IncludeAllRemainingBootDevices will be set to Enabled or Disabled, if -DisableMatchingDevices specified.
+    -Boot devices that match filters or from -IncludeAllRemainingBootDevices will be set to Enabled or Disabled, if -DisableMatchingDevices specified.
 
     -Run the script multiple times starting with the most generic filter and then more precise filters to make specific devices move to top of list.
     
     -After the boot devices found using a filter are set, the Dell CCTK will keep all remaining boot devices in their respective state and order, so it's not required to specify every device using a filter.
     
     -The return code will be:
-        0: Success - zero warnings and zero errors were encountered and all settings set successfully
+       -1: Success - zero warnings and zero errors were encountered and no settings were effectively changed
+        0: Success - zero warnings and zero errors were encountered and one or more settings were effectively changed
         1: Warning - one or more warnings and zero errors were encountered
         2: Error   - one or more errors were encountered
 #>
@@ -678,93 +681,251 @@ Function SetDellBiosSetting
         [Parameter(Mandatory=$True,Position=2)]
         [string]$CctkOptionName = "",
 
-        [Parameter(Mandatory=$True,Position=3)]
-        [string]$CctkOptionNewValue = "",
+        [Parameter(Mandatory=$False,Position=3)]
+        [string]$CctkOptionNewValue = "<GET_VALUE>",
 
         [Parameter(Mandatory=$False,Position=4)]
+        [string]$CctkValSetupPwd = "",
+
+        [Parameter(Mandatory=$False,Position=5)]
         [hashtable]$CctkErrorCodeLookupHashtable = @{}
     )
 
     <#
         Return codes:
-       -1: Success - CCTK option value was originally the same as the desired setting so no update was attempted
-        0: Success - CCTK option value was originally different vs. the desired setting but was successfully updated
-        1: Error   - CCTK option value not found on first check
-        2: Error   - CCTK option value not found on second check
-        3: Error   - CCTK option value found but not updated
+        -3: Success - CCTK "set-only" option succeeded
+        -2: Success - CCTK option value found and just returning current value
+        -1: Success - CCTK option value was originally the same as the desired setting so no update was attempted
+         0: Success - CCTK option value was originally different vs. the desired setting but was successfully updated
+         1: Warning - CCTK option not found/applicable
+        11: Error   - CCTK option value not found on first check
+        12: Error   - CCTK option value not found on second check
+        13: Error   - CCTK option value found but not updated
+        14: Error   - CCTK "set-only" option failed
+        15: Error   - CCTK option read-only and desired value didn't match
     #>
 
-    $iFuncRslt = 99999   # Default
+    $script:SetDellBiosSettingCount++  # Increment count of function calls
 
-    
-    # Call function to get current value
-    $objCctkOptionValue = GetDellBiosSetting -CctkPath $CctkPath -CctkOptionName $CctkOptionName
-    $strCctkOptionValue = $objCctkOptionValue.CctkCurrentValue
-    $iCctkOptionExitCode = $objCctkOptionValue.CctkExitCode
+    $iFuncRslt = 99999                 # Default function return code
 
-    # Check if current value found
-    if ($strCctkOptionValue -eq $null)
+
+# Create array of CCTK options that shouldn't be prefixed with two hyphens (here-string must be left-justified)
+$strCctkCommandDashExceptions = @"
+advsm
+bootorder
+keyboardbacklightcolor
+"@
+
+$arrCctkCommandDashExceptions = $strCctkCommandDashExceptions -split "`r`n"   # Need to split here-string into an array
+
+
+# Create array of CCTK options that can't be executed as a "get" (here-string must be left-justified)
+$strCctkCommandSetOnly = @"
+--o
+--outfile
+--setuppwd
+--sysdefaults
+--token
+"@
+
+$arrCctkCommandSetOnly = $strCctkCommandSetOnly -split "`r`n"   # Need to split here-string into an array
+
+
+# Create array of CCTK options that are read-only (here-string must be left-justified)
+$strCctkCommandReadOnly = @"
+--bioscharacteristics
+--bioscurlang
+--bioslistinstalllang
+--biosromsize
+--biosver
+--completioncode
+--cpucount
+--cpuspeed
+--firstpowerondate
+--hddinfo
+--lastbiosupdate
+--mem
+--mfgdate
+--minsizeofcontigmem
+--ovrwrt
+--pci
+--svctag
+--sysid
+--sysname
+--sysrev
+--uuid
+--version
+"@
+
+$arrCctkCommandReadOnly = $strCctkCommandReadOnly -split "`r`n"   # Need to split here-string into an array
+
+
+    # Ensure CCTK command option is lowercase (CCTK requirement)
+    $CctkOptionName = $CctkOptionName.ToLower()
+
+    # Prepend two hyphens if they don't exist and aren't on the list of exceptions
+    if ($CctkOptionName.StartsWith("--") -eq $false -and (@($CctkOptionName.TrimStart() -split " ")[0] -notin $arrCctkCommandDashExceptions))
     {
-        # CCTK value not found
-        write-host "$((get-date).tostring()): ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value not found (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))" -ForegroundColor Red
-        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value not found (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
-        $iFuncRslt = 1
+        $CctkOptionName = "--$CctkOptionName"
+    }
+
+
+    # Check if --valsetuppwd is blank
+    if ($CctkValSetupPwd -eq "")
+    {
+        # Is blank, don't include --valsetuppwd when executing CCTK
+        $strCctkSetCommandArgs = "$CctkOptionName=$CctkOptionNewValue"
     }
     else
     {
-        # Compare original value with desired value
-        if ($strCctkOptionValue.trim() -ieq $CctkOptionNewValue.trim() -and $iCctkOptionExitCode -eq 0)
+        # Isn't blank, include --valsetuppwd when executing CCTK
+        $strCctkSetCommandArgs = "$CctkOptionName=$CctkOptionNewValue --valsetuppwd=$CctkValSetupPwd"
+    }
+
+
+    # Handle "set-only" (without "get")
+    if ($CctkOptionName -in $arrCctkCommandSetOnly)
+    {
+        $objCctkOptionUpdate = Execute-Command -commandTitle "CCTK" -commandPath $CctkPath -commandArguments $strCctkSetCommandArgs
+        $arrCctkOptionUpdate = $objCctkOptionUpdate.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
+        $iCctkOptionUpdateExitCode = $objCctkOptionUpdate.ExitCode
+
+        # Check exit code for result
+        if ($iCctkOptionUpdateExitCode -eq 0)
         {
-            # Matches
-            write-host "$((get-date).tostring()): CCTK option `"$CctkOptionName`" already set to desired value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
-            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): CCTK option `"$CctkOptionName`" already set to desired value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
-            $iFuncRslt = -1
+            # Succeeded
+            write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName=$CctkOptionNewValue`" succeeded (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName=$CctkOptionNewValue`" succeeded (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
+            $iFuncRslt = -3
         }
         else
         {
-            # Doesn't match
-            write-host "$((get-date).tostring()): CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
-            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+            # Failed
+            write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName=$CctkOptionNewValue`" failed (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))" -ForegroundColor Red
+            write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName=$CctkOptionNewValue`" failed (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
+            $iFuncRslt = 14
+        }
+    }
+    else
+    {
+        # Call function to get current value
+        $objCctkOptionValue = GetDellBiosSetting -CctkPath $CctkPath -CctkOptionName $CctkOptionName
+        $strCctkOptionValue = $objCctkOptionValue.CctkCurrentValue
+        $iCctkOptionExitCode = $objCctkOptionValue.CctkExitCode
 
-            # Try updating value
-            $objCctkOptionUpdate = Execute-Command -commandTitle "CCTK" -commandPath $strCctkFullPath -commandArguments "$CctkOptionName=$CctkOptionNewValue"
-            $arrCctkOptionUpdate = $objCctkOptionUpdate.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
-            $iCctkOptionUpdateExitCode = $objCctkOptionUpdate.ExitCode
+        # Need to specially handle --secureboot
+        if ($CctkOptionName -ieq "--secureboot" -and $iCctkOptionExitCode -eq 257)
+        {
+            $strCctkOptionValue = "disable"
+        }
 
-            # Get the updated Dell value from the function instead of trying to duplicate logic here BUT use the CCTK exit code from the "update command"
-            $objCctkOptionValue2 = GetDellBiosSetting -CctkPath $CctkPath -CctkOptionName $CctkOptionName
-            $strCctkOptionValue2 = $objCctkOptionValue2.CctkCurrentValue
-            $iCctkOptionExitCode2 = $objCctkOptionValue2.CctkExitCode
-
-            # Check if updated value found
-            if ($strCctkOptionValue2 -eq $null)
+        # Check if CCTK exit code 119
+        if ($iCctkOptionExitCode -eq 119)
+        {
+            # CCTK option is N/A on this system
+            write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) WARNING: CCTK option `"$CctkOptionName`" is currently not applicable (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))" -ForegroundColor Yellow
+            write-log -FilePath $strLogfile -Type Warning -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) WARNING: CCTK option `"$CctkOptionName`" is currently not applicable (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+            $iFuncRslt = 1
+        }
+        else
+        {
+            # Check if current value found
+            if ($strCctkOptionValue -eq $null)
             {
                 # CCTK value not found
-                write-host "$((get-date).tostring()): ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; updated value not found (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))" -ForegroundColor Red
-                write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; updated value not found (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
-                $iFuncRslt = 2
+                write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value not found (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))" -ForegroundColor Red
+                write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value not found (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+                $iFuncRslt = 11
             }
             else
             {
-                # Compare updated value with desired value
-                if ($strCctkOptionValue2.trim() -ieq $CctkOptionNewValue.trim() -and $iCctkOptionUpdateExitCode -eq 0)
+                # Check if just getting the current value 
+                if (($CctkOptionNewValue.Trim()) -ieq "<GET_VALUE>")
                 {
-                    # Matches
-                    write-host "$((get-date).tostring()): CCTK option `"$CctkOptionName`" updated to desired value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
-                    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): CCTK option `"$CctkOptionName`" updated to desired value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
-                    $iFuncRslt = 0
+                    # Just get the current value
+                    write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" current value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+                    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" current value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+                    $iFuncRslt = -2
                 }
                 else
                 {
-                    # Doesn't match
-                    write-host "$((get-date).tostring()): ERROR CCTK option `"$CctkOptionName`" NOT updated to desired value: $CctkOptionNewValue; updated value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))" -ForegroundColor Red
-                    write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR CCTK option `"$CctkOptionName`" NOT updated to desired value: $CctkOptionNewValue; updated value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
-                    $iFuncRslt = 3
+                    # Trying to set the value
+
+                    # Compare original value with desired value and verify exit code is 0 or, if --secureboot, allow exit code 257
+                    if ($strCctkOptionValue.trim() -ieq $CctkOptionNewValue.trim() -and ($iCctkOptionExitCode -eq 0 -or ($CctkOptionName -ieq "--secureboot" -and $iCctkOptionExitCode -eq 257)))
+                    {
+                        # Matches
+                        write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" already set to desired value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+                        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" already set to desired value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+                        $iFuncRslt = -1
+                    }
+                    else
+                    {
+                        # Doesn't match
+                        write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+                        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; current value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+
+
+                        # Check if attempting to set a value for a read-only option
+                        if ($CctkOptionName -in $arrCctkCommandReadOnly)
+                        {
+                            # Trying to set value for read-only option
+                            write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" is read-only; unable to set desired value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))" -ForegroundColor Red
+                            write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" is read-only; unable to set desired value: $strCctkOptionValue (CCTK exit code: $iCctkOptionExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionExitCode))"
+                            $iFuncRslt = 15
+                        }
+                        else
+                        {
+                            # Try updating value
+                            $objCctkOptionUpdate = Execute-Command -commandTitle "CCTK" -commandPath $CctkPath -commandArguments $strCctkSetCommandArgs
+                            $arrCctkOptionUpdate = $objCctkOptionUpdate.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
+                            $iCctkOptionUpdateExitCode = $objCctkOptionUpdate.ExitCode
+
+                            # Get the updated Dell value from the function instead of trying to duplicate logic here BUT use the CCTK exit code from the "update command"
+                            $objCctkOptionValue2 = GetDellBiosSetting -CctkPath $CctkPath -CctkOptionName $CctkOptionName
+                            $strCctkOptionValue2 = $objCctkOptionValue2.CctkCurrentValue
+                            $iCctkOptionExitCode2 = $objCctkOptionValue2.CctkExitCode
+
+
+                            # Need to specially handle --secureboot
+                            if ($CctkOptionName -ieq "--secureboot" -and $iCctkOptionExitCode2 -eq 257)
+                            {
+                                $strCctkOptionValue2 = "disable"
+                            }
+
+                            # Check if updated value found
+                            if ($strCctkOptionValue2 -eq $null)
+                            {
+                                # CCTK value not found
+                                write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; updated value not found (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))" -ForegroundColor Red
+                                write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" desired value: $CctkOptionNewValue; updated value not found (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
+                                $iFuncRslt = 12
+                            }
+                            else
+                            {
+                                # Compare updated value with desired value
+                                if ($strCctkOptionValue2.trim() -ieq $CctkOptionNewValue.trim() -and $iCctkOptionUpdateExitCode -eq 0)
+                                {
+                                    # Matches
+                                    write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" updated to desired value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))" -ForegroundColor Green
+                                    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) CCTK option `"$CctkOptionName`" updated to desired value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
+                                    $iFuncRslt = 0
+                                }
+                                else
+                                {
+                                    # Doesn't match
+                                    write-host "$((get-date).tostring()): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" NOT updated to desired value: $CctkOptionNewValue; updated value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))" -ForegroundColor Red
+                                    write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ($script:SetDellBiosSettingCount) ERROR: CCTK option `"$CctkOptionName`" NOT updated to desired value: $CctkOptionNewValue; updated value: $strCctkOptionValue2 (CCTK update exit code: $iCctkOptionUpdateExitCode$($CctkErrorCodeLookupHashtable.$iCctkOptionUpdateExitCode))"
+                                    $iFuncRslt = 13
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-
 
     # Return overall result
     return $iFuncRslt
@@ -774,8 +935,9 @@ Function SetDellBiosSetting
 ############
 ### Main ###
 ############
-$iOverallErrorCt   = 0  # Track number of errors
-$iOverallWarningCt = 0  # Track number of warnings
+$iSettingsChangedCount = 0  # Use to track number of settings effectively changed
+$iOverallErrorCt       = 0  # Track number of errors
+$iOverallWarningCt     = 0  # Track number of warnings
 
 # Generate a GUID and use the prefix to track related log entries
 $strGuidPrefix = (([string][guid]::NewGuid()) -split "-")[0]
@@ -791,6 +953,20 @@ else
     $strLogfile = $LogFile
 }
 
+# Make sure the log folder exists
+$strLogFileDir = [System.IO.Path]::GetDirectoryName($strLogfile)
+if ((TestPathQuiet -DirOrFile $strLogFileDir) -eq $false)
+{
+    # Create the log folder
+    new-item -Path $strLogFileDir -ItemType Directory -Force | out-null
+
+    # Verify it was created
+    if ((TestPathQuiet -DirOrFile $strLogFileDir) -eq $false)
+    {
+        write-host "$((get-date).tostring()): WARNING: Log folder not created: $strLogFileDir" -ForegroundColor Yellow
+        $iOverallWarningCt++
+    }
+}
 
 # Import the SCCM-compatible logging module
 $strModuleFile = "$([System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Definition))\Logging.psm1"
@@ -801,7 +977,7 @@ catch {}
 
 if ([bool]$ImportRslt -ne $true)
 {
-    write-host "$($strGuidPrefix): WARNING: Logging module not imported" -ForegroundColor Yellow
+    write-host "$((get-date).tostring()): WARNING: Logging module not imported" -ForegroundColor Yellow
     $iOverallWarningCt++
 }
 
@@ -820,16 +996,6 @@ if ($strUsername -ieq ($env:COMPUTERNAME + "$"))
 # Check if running as a local Admin
 $bIsAdmin = IsAdmin
 
-if ($bIsAdmin -eq $True)
-{
-    $strLogType = "Informational"
-}
-else
-{
-    $iOverallErrorCt++
-    $strLogType = "Error"
-} 
-
 # Get computer name
 $ComputerName = $env:COMPUTERNAME.ToUpper()
 
@@ -840,27 +1006,80 @@ $strLastBootTime = get-date ([System.Management.ManagementDateTimeconverter]::To
 $strThisScript = $MyInvocation.MyCommand.Definition
 $strThisScriptPath = [System.IO.Path]::GetDirectoryName($strThisScript)
 
-$BootListType = $BootListType.ToLower()  # CCTK requires lowercase
+# Get computer manufacturer and model
+$objWmiComputerSystem = $null
+try { $objWmiComputerSystem = @(gwmi -Class Win32_ComputerSystem -ErrorAction Stop) }
+catch {}
+
+if ($objWmiComputerSystem -eq $null)
+{
+    $strComputerManufacturer = "<Unknown>"
+    $strComputerManufacturer = "<Unknown>"
+}
+else
+{
+    $strComputerManufacturer = $objWmiComputerSystem.Manufacturer
+    $strComputerModel        = $objWmiComputerSystem.Model
+}
+
+# Get current computer BIOS version
+$objWmiBios = $null
+try { $objWmiBios = @(gwmi -Class Win32_BIOS -ErrorAction Stop) }
+catch {}
+
+if ($objWmiBios -eq $null)
+{
+    $strComputerBiosVersion = "<Unknown>"
+}
+else
+{
+    $strComputerBiosVersion = $objWmiBios.SMBIOSBIOSVersion
+}
 
 
 #----------------------------#
 # Update log with basic info #
 #----------------------------#
+$BootListType = $BootListType.ToLower()  # CCTK requires lowercase
+
+
 write-host "$((get-date).tostring()): Log File: $strLogfile"
+
+# Ensure only runs on Dell models, excluding the Dell R7910
+$strLogTypeComputerMfgModel = "Informational"
+if ($strComputerManufacturer -ieq "Dell Inc." -and $strComputerModel -notin @("Precision Rack 7910"))
+{
+    write-host "$((get-date).tostring()): Computer Manufacturer: $strComputerManufacturer"
+    write-host "$((get-date).tostring()): Computer Model: $strComputerModel"
+}
+else
+{
+    write-host "$((get-date).tostring()): WARNING: Computer Manufacturer: $strComputerManufacturer" -ForegroundColor Yellow
+    write-host "$((get-date).tostring()): WARNING: Computer Model: $strComputerModel" -ForegroundColor Yellow
+    $strLogTypeComputerMfgModel = "Warning"
+    $iOverallWarningCt += 2
+}
+
+write-host "$((get-date).tostring()): Current BIOS Version: $strComputerBiosVersion"
 write-host "$((get-date).tostring()): Computer Name: $ComputerName"
 write-host "$((get-date).tostring()): User Name: $strUsername"
 
+# Ensure user is an Admin
 if ($bIsAdmin -eq $True)
 {
     write-host "$((get-date).tostring()): User is an Admin: $bIsAdmin"
+    $strLogTypeIsAdmin = "Informational"
 }
 else
 {
     write-host "$((get-date).tostring()): ERROR: User is an Admin: $bIsAdmin" -ForegroundColor Red
+    $iOverallErrorCt++
+    $strLogTypeIsAdmin = "Error"
 } 
 
 write-host "$((get-date).tostring()): Last Boot Time: $strLastBootTime"
 write-host "$((get-date).tostring()): Log Max Size (bytes): $MaxLogSizeBytes"
+
 write-host "$((get-date).tostring()): BootListType: $BootListType"
 write-host "$((get-date).tostring()): DisableMatchingDevices: $DisableMatchingDevices"
 write-host "$((get-date).tostring()): FilterDeviceDescription: $FilterDeviceDescription"
@@ -873,12 +1092,17 @@ write-host "$((get-date).tostring()): SkipHapiPreinstall: $SkipHapiPreinstall"
 write-host "$((get-date).tostring()): SkipHapiRemoval: $SkipHapiRemoval"
 write-host "$((get-date).tostring()): SortFilterMatchesDescending: $SortFilterMatchesDescending"
 
+# Update log
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Log file: $strLogfile"
+write-log -FilePath $strLogfile -Type $strLogTypeComputerMfgModel -Message "$($strGuidPrefix): Computer Manufacturer: $strComputerManufacturer"
+write-log -FilePath $strLogfile -Type $strLogTypeComputerMfgModel -Message "$($strGuidPrefix): Computer Model: $strComputerModel"
+write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Current BIOS Version: $strComputerBiosVersion"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Computer Name: $ComputerName"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): User Name: $strUsername"
-write-log -FilePath $strLogfile -Type $strLogType   -Message "$($strGuidPrefix): User is an Admin: $bIsAdmin"
+write-log -FilePath $strLogfile -Type $strLogTypeIsAdmin -Message "$($strGuidPrefix): User is an Admin: $bIsAdmin"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Last Boot Time: $strLastBootTime"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Log Max Size (bytes): $MaxLogSizeBytes"
+
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): BootListType: $BootListType"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): DisableMatchingDevices: $DisableMatchingDevices"
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): FilterDeviceDescription: $FilterDeviceDescription"
@@ -892,278 +1116,382 @@ write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix):
 write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): SortFilterMatchesDescending: $SortFilterMatchesDescending"
 
 
-#--------------------------------------------------------#
-# Preinstall HAPI to speed up multiple calls to cctk.exe #
-#--------------------------------------------------------#
-if ($SkipHapiPreinstall -eq $False)
+#---------------------------------------#
+# Only execute on supported Dell models #
+#---------------------------------------#
+if ($strLogTypeComputerMfgModel -ieq "Warning")
 {
-    $iHapiRslt = InstallOrRemoveHapi -Action Install -ThisScriptPath $strThisScriptPath
-
-    # Record result
-    if ($iHapiRslt -eq 0)
-    {
-        write-host "$((get-date).tostring()): HAPI pre-install succeeded ($iHapiRslt)"
-        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): HAPI pre-install succeeded ($iHapiRslt)"
-    }
-    else
-    {
-        write-host "$((get-date).tostring()): ERROR: HAPI pre-install failed ($iHapiRslt)" -ForegroundColor Red
-        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: HAPI pre-install failed ($iHapiRslt)"
-        $iOverallErrorCt++
-    } 
-}
-
-
-#------------------------#
-# Verify CCTK.exe exists #
-#------------------------#
-$strCctkFullPath = "$strThisScriptPath\Command_Configure\X86_64\cctk.exe"
-
-if ((TestPathQuiet -DirOrFile $strCctkFullPath) -eq $true)
-{
-    # File found
-    write-host "$((get-date).tostring()): File found: $strCctkFullPath"
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): File found: $strCctkFullPath"
-}
-else
-{
-    # File not found
-    write-host "$((get-date).tostring()): ERROR: File not found: $strCctkFullPath" -ForegroundColor Red
-    write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: File not found: $strCctkFullPath"
-    $iOverallErrorCt++
-}
-
-
-#------------------------------------------------------------------------#
-# Load the CCTK error codes file to help resolve to friendly description #
-#------------------------------------------------------------------------#
-$htCctkErrorCodeLookup = @{}   # Create empty hashtable
-
-$strCctkErrorCodeLookupFile = "$strThisScriptPath\CCTK_Error_Codes.txt"
-
-# Verify lookup file exists
-if ((TestPathQuiet -DirOrFile $strCctkErrorCodeLookupFile) -eq $true)
-{
-    # File found
-    write-host "$((get-date).tostring()): File found: $strCctkErrorCodeLookupFile"
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): File found: $strCctkErrorCodeLookupFile"
-
-    # Load into a MatchInfo object array where line starts with a number
-    $arrMiCctkErrorCodeLookup = get-content $strCctkErrorCodeLookupFile -Encoding Ascii | select-string "^\s*\d+.\s*"
-
-    # Loop through MatchInfo object array
-    foreach ($objMiCctkErrorCodeLookup in $arrMiCctkErrorCodeLookup)
-    {
-        # Parse current MatchInfo line and use number as key
-        $iCctkErrorCodeLookupKey = [int]($objMiCctkErrorCodeLookup.matches.value)
-        $strCctkErrorCodeLookup  = [string](($objMiCctkErrorCodeLookup.line -split ($objMiCctkErrorCodeLookup.matches.value))[1])
-        
-        # Surround result with brackets if at least one character long, to help with formatting during output/logging
-        if ($strCctkErrorCodeLookup.Length -ge 1)
-        {
-            $strCctkErrorCodeLookup = " [$strCctkErrorCodeLookup]"
-        }
-
-        # Add to hashtable
-        $htCctkErrorCodeLookup.Add($iCctkErrorCodeLookupKey, $strCctkErrorCodeLookup)
-    }
-}
-else
-{
-    # File not found
-    write-host "$((get-date).tostring()): WARNING: File not found: $strCctkErrorCodeLookupFile" -ForegroundColor Yellow
-    write-log -FilePath $strLogfile -Type Warning -Message "$($strGuidPrefix): WARNING: File not found: $strCctkErrorCodeLookupFile"
+    write-host "$((get-date).tostring()): WARNING: Computer manufacturer and/or model not supported" -ForegroundColor Yellow
     $iOverallWarningCt++
 }
-
-
-#------------------------------------------------#
-# Get current boot order and determine new order #
-#------------------------------------------------#
-$arrObjCctkBootOrderDevices = GetDellBootOrder -BootListType $BootListType -CctkPath $strCctkFullPath
-write-host "`n`nORIGINAL BOOT ORDER:" -ForegroundColor Yellow
-$arrObjCctkBootOrderDevices | ft -AutoSize
-
-# Output original order to log
-write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ORIGINAL BOOT ORDER:"
-
-$iCurrBootOrderDeviceIdx = 0
-foreach ($objObjCctkBootOrderDevice in $arrObjCctkBootOrderDevices)
-{
-    $iCurrBootOrderDeviceIdx++
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($iCurrBootOrderDeviceIdx) $objObjCctkBootOrderDevice"
-}
-
-# Get device numbers that match the filters
-$arrCctkBootOrderDeviceIDs = @()
-$arrCctkBootOrderDeviceIDs = @($arrObjCctkBootOrderDevices | where {$_.DeviceDescription -match $FilterDeviceDescription -and $_.DeviceNumber -match $FilterDeviceNumber -and $_.DeviceStatus -match $FilterDeviceStatus -and $_.DeviceType -match $FilterDeviceType -and $_.Shortform -match $FilterShortform} | sort DeviceNumber | select -ExpandProperty DeviceNumber)
-
-# Sort devices that matched filters in descending order, if specified
-if ($SortFilterMatchesDescending -eq $true)
-{
-    $arrCctkBootOrderDeviceIDs = $arrCctkBootOrderDeviceIDs | sort -Descending
-}
-
-# Add in all remaining devices, if specified
-if ($IncludeAllRemainingBootDevices -eq $true)
-{
-    $arrCctkBootOrderDeviceIDs += $arrObjCctkBootOrderDevices.DeviceNumber
-}
-
-# Remove duplicates
-$arrCctkBootOrderDeviceIDs = $arrCctkBootOrderDeviceIDs | Select-Object -Unique
-
-# Join matching boot device ID sequence into string
-if ($arrCctkBootOrderDeviceIDs -eq $null -or @($arrCctkBootOrderDeviceIDs).count -eq 0)
-{
-    # No matching boot device IDs
-    write-host "$((get-date).tostring()): ERROR: No boot devices matched filters" -ForegroundColor Red
-    write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: No boot devices matched filters"
-    $iOverallErrorCt++
-}
 else
 {
-    # Join matching boot device IDs
-    $strCctkBootOrderDeviceIDs = [string]::join(",", $arrCctkBootOrderDeviceIDs)
-    write-host "$((get-date).tostring()): Matching boot device numbers to order first: $strCctkBootOrderDeviceIDs"
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Matching boot device numbers to order first: $strCctkBootOrderDeviceIDs"
-}
-
-
-#-------------------------------------#
-# Update boot order and verify result #
-#-------------------------------------#
-if ($DisableMatchingDevices -eq $true)
-{
-    # Disable matching boot devices
-    $strMatchingDeviceDesiredState = "DISABLED"
-    $strMatchingDeviceDesiredStateCctkAction = "disabledevice"
-}
-else
-{
-    # Enable matching boot devices
-    $strMatchingDeviceDesiredState = "ENABLED"
-    $strMatchingDeviceDesiredStateCctkAction = "enabledevice"
-}
-
-
-# Update boot order
-$objCctkBootOrder2 = Execute-Command -commandTitle "CCTK" -commandPath $strCctkFullPath -commandArguments "`"bootorder`" `"--bootlisttype=$BootListType`" `"--sequence=$strCctkBootOrderDeviceIDs`" `"--$strMatchingDeviceDesiredStateCctkAction=$strCctkBootOrderDeviceIDs`""
-$arrCctkBootOrder2 = $objCctkBootOrder2.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
-
-# Recheck the boot order to verify changes were successful
-$arrObjCctkBootOrderDevices2 = GetDellBootOrder -BootListType $BootListType -CctkPath $strCctkFullPath
-write-host "`n`nUPDATED BOOT ORDER:" -ForegroundColor Yellow
-$arrObjCctkBootOrderDevices2 | ft -AutoSize
-write-host ""
-
-# Output updated order to log
-write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): UPDATED BOOT ORDER:"
-
-$iCurrBootOrderDeviceIdx2 = 0
-foreach ($objObjCctkBootOrderDevice2 in $arrObjCctkBootOrderDevices2)
-{
-    $iCurrBootOrderDeviceIdx2++
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($iCurrBootOrderDeviceIdx2) $objObjCctkBootOrderDevice2"
-}
-
-
-# Join updated boot device ID sequence into string
-$arrCctkBootOrderDeviceIDs2 = $arrObjCctkBootOrderDevices2.DeviceNumber
-
-if ($arrCctkBootOrderDeviceIDs2 -eq $null)
-{
-    # No matching boot device IDs
-    write-host "$((get-date).tostring()): ERROR: No boot devices found during re-check" -ForegroundColor Red
-    write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: No boot devices found during re-check"
-    $iOverallErrorCt++
-}
-else
-{
-    # Join matching boot device IDs
-    $strCctkBootOrderDeviceIDs2 = [string]::join(",", $arrCctkBootOrderDeviceIDs2)
-    write-host "$((get-date).tostring()): Updated boot device numbers order: $strCctkBootOrderDeviceIDs2"
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Updated boot device numbers order: $strCctkBootOrderDeviceIDs2"    
-}
-
-
-# Compare matching and updated boot device ID list to determine result
-if (($strCctkBootOrderDeviceIDs -ne $null) -and ($strCctkBootOrderDeviceIDs2 -ne $null) -and ($strCctkBootOrderDeviceIDs2.length -ge $strCctkBootOrderDeviceIDs.length) -and ($strCctkBootOrderDeviceIDs2.substring(0, $strCctkBootOrderDeviceIDs.length) -eq $strCctkBootOrderDeviceIDs))
-{
-    # Updated boot device number list begins with or equals matching boot device number list
-    write-host "$((get-date).tostring()): Updated boot device number list begins with or equals matching boot device number list"
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Updated boot device number list begins with or equals matching boot device number list"
-}
-else
-{
-    # Updated boot device number list doesn't begin with or equal matching boot device number list
-    write-host "$((get-date).tostring()): ERROR: Updated boot device number list doesn't begin with or equal matching boot device number list" -ForegroundColor Red
-    write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: Updated boot device number list doesn't begin with or equal matching boot device number list"
-    $iOverallErrorCt++
-}
-
-
-#------------------------------------------------------------------#
-# Make sure matching boot devices are Enabled or Disabled properly #
-#------------------------------------------------------------------#
-$arrCctkBootOrderDeviceIDs2StateNotCorrect = $arrObjCctkBootOrderDevices2 | where {$_.DeviceNumber -in @($arrCctkBootOrderDeviceIDs) -and $_.DeviceStatus -ine $strMatchingDeviceDesiredState}
-
-if (@($arrCctkBootOrderDeviceIDs2StateNotCorrect).Count -eq 0)
-{
-    # All matching boot devices in desired state
-    write-host "$((get-date).tostring()): All matching boot devices in $strMatchingDeviceDesiredState state"
-    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): All matching boot devices in $strMatchingDeviceDesiredState state"
-}
-else
-{
-    # One or more matching boot devices not in desired state
-    write-host "ERROR: One or more matching boot devices not in $strMatchingDeviceDesiredState state:" -ForegroundColor Red
-    $arrCctkBootOrderDeviceIDs2StateNotCorrect | ft -AutoSize
-    
-    # Output to log
-    write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: One or more matching boot devices not in $strMatchingDeviceDesiredState state:"
-
-    $iCurrBootOrderDeviceStateNotCorrectIdx = 0
-    foreach ($objCctkBootOrderDeviceIDs2StateNotCorrect in $arrCctkBootOrderDeviceIDs2StateNotCorrect)
+    #--------------------------------------------------------#
+    # Preinstall HAPI to speed up multiple calls to cctk.exe #
+    #--------------------------------------------------------#
+    if ($SkipHapiPreinstall -eq $False)
     {
-        $iCurrBootOrderDeviceStateNotCorrectIdx++
-        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ($iCurrBootOrderDeviceStateNotCorrectIdx) $objCctkBootOrderDeviceIDs2StateNotCorrect"
-        $iOverallErrorCt++
+        $iHapiRslt = InstallOrRemoveHapi -Action Install -ThisScriptPath $strThisScriptPath
+
+        # Record result
+        if ($iHapiRslt -eq 0)
+        {
+            write-host "$((get-date).tostring()): HAPI pre-install succeeded ($iHapiRslt)"
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): HAPI pre-install succeeded ($iHapiRslt)"
+        }
+        else
+        {
+            write-host "$((get-date).tostring()): ERROR: HAPI pre-install failed ($iHapiRslt)" -ForegroundColor Red
+            write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: HAPI pre-install failed ($iHapiRslt)"
+            $iOverallErrorCt++
+        } 
     }
-}
 
 
-#--------------------------------------------------------#
-# Set the active boot list to the specified BootListType #
-#--------------------------------------------------------#
-$iSetCctkRslt = SetDellBiosSetting -CctkPath $strCctkFullPath -CctkOptionName "bootorder --activebootlist" -CctkOptionNewValue $BootListType -CctkErrorCodeLookupHashtable $htCctkErrorCodeLookup
+    #------------------------#
+    # Verify CCTK.exe exists #
+    #------------------------#
+    $strCctkFullPath = "$strThisScriptPath\Command_Configure\X86_64\cctk.exe"
 
-# If function return code is >= 1 then there was an error
-if ($iSetCctkRslt -ge 1)
-{
-    $iOverallErrorCt++
-}
-
-
-#-------------#
-# Remove HAPI #
-#-------------#
-if ($SkipHapiRemoval -eq $False)
-{
-    $iHapiRslt = InstallOrRemoveHapi -Action Remove -ThisScriptPath $strThisScriptPath
-    
-    # Record result
-    if ($iHapiRslt -eq 0)
+    if ((TestPathQuiet -DirOrFile $strCctkFullPath) -eq $true)
     {
-        write-host "$((get-date).tostring()): HAPI removal succeeded ($iHapiRslt)"
-        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): HAPI removal succeeded ($iHapiRslt)"
+        # File found
+        write-host "$((get-date).tostring()): File found: $strCctkFullPath"
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): File found: $strCctkFullPath"
     }
     else
     {
-        write-host "$((get-date).tostring()): WARNING: HAPI removal failed but may have not been installed ($iHapiRslt)" -ForegroundColor Yellow
-        write-log -FilePath $strLogfile -Type Warning -Message "$($strGuidPrefix): WARNING: HAPI removal failed but may have not been installed ($iHapiRslt)"
+        # File not found
+        write-host "$((get-date).tostring()): ERROR: File not found: $strCctkFullPath" -ForegroundColor Red
+        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: File not found: $strCctkFullPath"
+        $iOverallErrorCt++
+    }
+
+
+    #------------------------------------------------------------------------#
+    # Load the CCTK error codes file to help resolve to friendly description #
+    #------------------------------------------------------------------------#
+    $htCctkErrorCodeLookup = @{}   # Create empty hashtable
+
+    $strCctkErrorCodeLookupFile = "$strThisScriptPath\cctkerrorcodes.txt"
+
+    # Verify lookup file exists
+    if ((TestPathQuiet -DirOrFile $strCctkErrorCodeLookupFile) -eq $true)
+    {
+        # File found
+        write-host "$((get-date).tostring()): File found: $strCctkErrorCodeLookupFile"
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): File found: $strCctkErrorCodeLookupFile"
+
+        # Load into a MatchInfo object array where line starts with a number
+        $arrMiCctkErrorCodeLookup = get-content $strCctkErrorCodeLookupFile -Encoding Ascii | select-string "^\s*\d+.\s*"
+
+        # Loop through MatchInfo object array
+        foreach ($objMiCctkErrorCodeLookup in $arrMiCctkErrorCodeLookup)
+        {
+            # Parse current MatchInfo line and use number as key
+            $iCctkErrorCodeLookupKey = [int]($objMiCctkErrorCodeLookup.matches.value)
+            $strCctkErrorCodeLookup  = [string](($objMiCctkErrorCodeLookup.line -split ($objMiCctkErrorCodeLookup.matches.value))[1])
+        
+            # Surround result with brackets if at least one character long, to help with formatting during output/logging
+            if ($strCctkErrorCodeLookup.Length -ge 1)
+            {
+                $strCctkErrorCodeLookup = " [$strCctkErrorCodeLookup]"
+            }
+
+            # Add to hashtable
+            $htCctkErrorCodeLookup.Add($iCctkErrorCodeLookupKey, $strCctkErrorCodeLookup)
+        }
+    }
+    else
+    {
+        # File not found
+        write-host "$((get-date).tostring()): WARNING: File not found: $strCctkErrorCodeLookupFile" -ForegroundColor Yellow
+        write-log -FilePath $strLogfile -Type Warning -Message "$($strGuidPrefix): WARNING: File not found: $strCctkErrorCodeLookupFile"
         $iOverallWarningCt++
-    } 
+    }
+
+
+    #------------------------------------------------#
+    # Get current boot order and determine new order #
+    #------------------------------------------------#
+    $arrObjCctkBootOrderDevices = GetDellBootOrder -BootListType $BootListType -CctkPath $strCctkFullPath
+    write-host "`n`nORIGINAL BOOT ORDER:" -ForegroundColor Yellow
+    $arrObjCctkBootOrderDevices | ft -AutoSize
+
+    # Output original order to log
+    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ORIGINAL BOOT ORDER:"
+
+    $iCurrBootOrderDeviceIdx = 0
+    foreach ($objObjCctkBootOrderDevice in $arrObjCctkBootOrderDevices)
+    {
+        $iCurrBootOrderDeviceIdx++
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($iCurrBootOrderDeviceIdx) $objObjCctkBootOrderDevice"
+    }
+  
+    # Get device numbers that match the filters
+    $arrCctkBootOrderDeviceIDs = @($arrObjCctkBootOrderDevices | where {$_.DeviceDescription -match $FilterDeviceDescription -and $_.DeviceNumber -match $FilterDeviceNumber -and $_.DeviceStatus -match $FilterDeviceStatus -and $_.DeviceType -match $FilterDeviceType -and $_.Shortform -match $FilterShortform} | sort DeviceNumber | select -ExpandProperty DeviceNumber)
+
+    # Sort devices that matched filters in descending order, if specified
+    if ($SortFilterMatchesDescending -eq $true)
+    {
+        $arrCctkBootOrderDeviceIDs = $arrCctkBootOrderDeviceIDs | sort -Descending
+    }
+
+    # Add in all remaining devices, if specified
+    if ($IncludeAllRemainingBootDevices -eq $true)
+    {
+        $arrCctkBootOrderDeviceIDs += $arrObjCctkBootOrderDevices.DeviceNumber
+    }
+
+    # Remove duplicates
+    $arrCctkBootOrderDeviceIDs = $arrCctkBootOrderDeviceIDs | Select-Object -Unique
+
+    # Join matching boot device ID sequence into string
+    if ($arrCctkBootOrderDeviceIDs -eq $null -or @($arrCctkBootOrderDeviceIDs).count -eq 0)
+    {
+        # No matching boot device IDs
+        write-host "$((get-date).tostring()): WARNING: No boot devices matched filters" -ForegroundColor Yellow
+        write-log -FilePath $strLogfile -Type Warning -Message "$($strGuidPrefix): WARNING: No boot devices matched filters"
+        $strCctkBootOrderDeviceIDs = ""
+        $iOverallWarningCt++
+    }
+    else
+    {
+        # Join matching boot device IDs
+        write-host "$((get-date).tostring()): Matching boot device numbers to order first: $strCctkBootOrderDeviceIDs"
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Matching boot device numbers to order first: $strCctkBootOrderDeviceIDs"
+        $strCctkBootOrderDeviceIDs = [string]::join(",", $arrCctkBootOrderDeviceIDs)
+    }
+
+
+    #-------------------------------------#
+    # Update boot order and verify result #
+    #-------------------------------------#
+    if ($DisableMatchingDevices -eq $true)
+    {
+        # Disable matching boot devices
+        $strMatchingDeviceDesiredState = "DISABLED"
+        $strMatchingDeviceDesiredStateCctkAction = "disabledevice"
+    }
+    else
+    {
+        # Enable matching boot devices
+        $strMatchingDeviceDesiredState = "ENABLED"
+        $strMatchingDeviceDesiredStateCctkAction = "enabledevice"
+    }
+
+
+    # Update boot order
+    $objCctkBootOrder2 = Execute-Command -commandTitle "CCTK" -commandPath $strCctkFullPath -commandArguments "`"bootorder`" `"--bootlisttype=$BootListType`" `"--sequence=$strCctkBootOrderDeviceIDs`" `"--$strMatchingDeviceDesiredStateCctkAction=$strCctkBootOrderDeviceIDs`""
+    $arrCctkBootOrder2 = $objCctkBootOrder2.stdout -split "`r`n"   # Need to split stdout into an array since it's just a string
+
+    # Recheck the boot order to verify changes were successful
+    $arrObjCctkBootOrderDevices2 = GetDellBootOrder -BootListType $BootListType -CctkPath $strCctkFullPath
+    write-host "`n`nUPDATED BOOT ORDER:" -ForegroundColor Yellow
+    $arrObjCctkBootOrderDevices2 | ft -AutoSize
+    write-host ""
+
+    # Output updated order to log
+    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): UPDATED BOOT ORDER:"
+
+    $iCurrBootOrderDeviceIdx2 = 0
+    foreach ($objObjCctkBootOrderDevice2 in $arrObjCctkBootOrderDevices2)
+    {
+        $iCurrBootOrderDeviceIdx2++
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): ($iCurrBootOrderDeviceIdx2) $objObjCctkBootOrderDevice2"
+    }
+
+
+    # Join updated boot device ID sequence into string
+    $arrCctkBootOrderDeviceIDs2 = $arrObjCctkBootOrderDevices2.DeviceNumber
+
+    if ($arrCctkBootOrderDeviceIDs2 -eq $null)
+    {
+        # No matching boot device IDs
+        write-host "$((get-date).tostring()): ERROR: No boot devices found during re-check" -ForegroundColor Red
+        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: No boot devices found during re-check"
+        $iOverallErrorCt++
+    }
+    else
+    {
+        # Get the device numbers in the original order
+        $strCctkBootOrderDeviceIDsOriginal = [string]::join(",", $arrObjCctkBootOrderDevices.DeviceNumber)
+
+        # Join matching boot device IDs
+        $strCctkBootOrderDeviceIDs2 = [string]::join(",", $arrCctkBootOrderDeviceIDs2)
+
+        # Check if the updated boot order list has changed
+        if ($strCctkBootOrderDeviceIDsOriginal -eq $strCctkBootOrderDeviceIDs2)
+        {
+            # Same
+            write-host "$((get-date).tostring()): Updated boot device numbers order: $strCctkBootOrderDeviceIDs2 (unchanged)"
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Updated boot device numbers order: $strCctkBootOrderDeviceIDs2 (unchanged)"
+        }
+        else
+        {
+            # Different
+            write-host "$((get-date).tostring()): Updated boot device numbers order: $strCctkBootOrderDeviceIDs2 (changed)"
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Updated boot device numbers order: $strCctkBootOrderDeviceIDs2 (changed)"
+            $iSettingsChangedCount++
+        }
+    }
+
+
+    # Compare matching and updated boot device ID list to determine result
+    if ($strCctkBootOrderDeviceIDs -ne $null -and $strCctkBootOrderDeviceIDs2 -ne $null -and ($strCctkBootOrderDeviceIDs2.length -ge $strCctkBootOrderDeviceIDs.length) -and ($strCctkBootOrderDeviceIDs2.substring(0, $strCctkBootOrderDeviceIDs.length) -eq $strCctkBootOrderDeviceIDs))
+    {
+        # Updated boot device number list begins with or equals matching filters
+        write-host "$((get-date).tostring()): Updated boot device number list begins with or equals matching filters"
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Updated boot device number list begins with or equals matching filters"
+    }
+    else
+    {
+        # Updated boot device number list doesn't begin with or equal matching filters
+        write-host "$((get-date).tostring()): ERROR: Updated boot device number list doesn't begin with or equal matching filters" -ForegroundColor Red
+        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: Updated boot device number list doesn't begin with or equal matching filters"
+        $iOverallErrorCt++
+    }
+
+
+    #------------------------------------------------------------------#
+    # Make sure matching boot devices are Enabled or Disabled properly #
+    #------------------------------------------------------------------#
+    # Get original device status
+    $arrCctkBootOrderDeviceIDsStateNotCorrect = $arrObjCctkBootOrderDevices | where {$_.DeviceNumber -in @($arrCctkBootOrderDeviceIDs) -and $_.DeviceStatus -ine $strMatchingDeviceDesiredState}
+    $iCctkBootOrderDeviceIDsStateNotCorrectCt = @($arrCctkBootOrderDeviceIDsStateNotCorrect).Count
+
+    # Get updated device status
+    $arrCctkBootOrderDeviceIDs2StateNotCorrect = $arrObjCctkBootOrderDevices2 | where {$_.DeviceNumber -in @($arrCctkBootOrderDeviceIDs) -and $_.DeviceStatus -ine $strMatchingDeviceDesiredState}
+    $iCctkBootOrderDeviceIDs2StateNotCorrectCt = @($arrCctkBootOrderDeviceIDs2StateNotCorrect).Count
+
+    # Compare original vs. updated device status to see if any changes made
+    if ($iCctkBootOrderDeviceIDsStateNotCorrectCt -eq $iCctkBootOrderDeviceIDs2StateNotCorrectCt)
+    {
+        # Same
+        $strBootOrderDeviceIDsComparison = "unchanged"
+    }
+    else
+    {
+        # Different
+        $strBootOrderDeviceIDsComparison = "changed"
+        $iSettingsChangedCount++
+    }
+
+    # Check updated result
+    if ($iCctkBootOrderDeviceIDs2StateNotCorrectCt -eq 0)
+    {
+        # All matching boot devices in desired state
+        write-host "$((get-date).tostring()): All matching boot devices in $strMatchingDeviceDesiredState state ($strBootOrderDeviceIDsComparison)"
+        write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): All matching boot devices in $strMatchingDeviceDesiredState state ($strBootOrderDeviceIDsComparison)"
+    }
+    else
+    {
+        # One or more matching boot devices not in desired state
+        write-host "ERROR: One or more matching boot devices not in $strMatchingDeviceDesiredState state ($strBootOrderDeviceIDsComparison):" -ForegroundColor Red
+        $arrCctkBootOrderDeviceIDs2StateNotCorrect | ft -AutoSize
+    
+        # Output to log
+        write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ERROR: One or more matching boot devices not in $strMatchingDeviceDesiredState state ($strBootOrderDeviceIDsComparison):"
+
+        $iCurrBootOrderDeviceStateNotCorrectIdx = 0
+        foreach ($objCctkBootOrderDeviceIDs2StateNotCorrect in $arrCctkBootOrderDeviceIDs2StateNotCorrect)
+        {
+            $iCurrBootOrderDeviceStateNotCorrectIdx++
+            write-log -FilePath $strLogfile -Type Error -Message "$($strGuidPrefix): ($iCurrBootOrderDeviceStateNotCorrectIdx) $objCctkBootOrderDeviceIDs2StateNotCorrect"
+            $iOverallErrorCt++
+        }
+    }
+
+
+    #--------------------------------------------------------#
+    # Set the active boot list to the specified BootListType #
+    #--------------------------------------------------------#
+    # Set the CCTK command list
+    $arrCctkCommands = @("bootorder --activebootlist=$BootListType")
+
+
+    #---------------------------#
+    # Execute the CCTK commands #
+    #---------------------------#
+    $script:SetDellBiosSettingCount = 0   # Use to track count of function calls, to help with logging
+    
+    # Loop through each CCTK command
+    foreach ($strCctkCommand in $arrCctkCommands)
+    {
+        $strCctkCommand = [string]$strCctkCommand
+
+        # Parse the option name and the value
+        $iCctkCommandLastEquals = $strCctkCommand.IndexOf("=")
+
+        if ($iCctkCommandLastEquals -eq -1)
+        {
+            # Not found
+            $strCctkCommandOptionName  = $strCctkCommand.Trim()
+            $strCctkCommandOptionValue = "<GET_VALUE>"
+            $strCctkCommandOptionValSetupPwd = ""
+        }
+        else
+        {
+            # Found
+            $strCctkCommandOptionName  = $strCctkCommand.Substring(0, $iCctkCommandLastEquals).Trim()
+            $strCctkCommandOptionValueTemp = $strCctkCommand.Substring($iCctkCommandLastEquals +1, $strCctkCommand.Length - $iCctkCommandLastEquals -1)
+
+            # Separate option value vs. --valsetuppwd
+            $strCctkCommandOptionValue = [string](@($strCctkCommandOptionValueTemp -split " --valsetuppwd=")[0])
+            $strCctkCommandOptionValSetupPwd = [string](@($strCctkCommandOptionValueTemp -split " --valsetuppwd=")[1])
+        }
+
+
+        # Call function to get/set value (output handled in function)
+        $iSetCctkRslt = SetDellBiosSetting -CctkPath $strCctkFullPath -CctkOptionName $strCctkCommandOptionName -CctkOptionNewValue $strCctkCommandOptionValue -CctkErrorCodeLookupHashtable $htCctkErrorCodeLookup -CctkValSetupPwd $strCctkCommandOptionValSetupPwd
+
+        # Determine result impacts
+        if ($iSetCctkRslt -eq 0)
+        {
+            $iSettingsChangedCount++
+        }
+        else
+        {
+            # If function return code is >= 11 then there was an error
+            if ($iSetCctkRslt -ge 11)
+            {
+                $iOverallErrorCt++
+            }
+            else
+            {
+                # If function return code is >= 1 then there was a warning
+                if ($iSetCctkRslt -ge 1)
+                {
+                    $iOverallWarningCt++
+                }
+            }
+        }
+    }
+
+    write-host "$((get-date).tostring()): Number of settings effectively changed: $iSettingsChangedCount"
+    write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Number of settings effectively changed: $iSettingsChangedCount"
+
+
+    #-------------#
+    # Remove HAPI #
+    #-------------#
+    if ($SkipHapiRemoval -eq $False)
+    {
+        $iHapiRslt = InstallOrRemoveHapi -Action Remove -ThisScriptPath $strThisScriptPath
+    
+        # Record result
+        if ($iHapiRslt -eq 0)
+        {
+            write-host "$((get-date).tostring()): HAPI removal succeeded ($iHapiRslt)"
+            write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): HAPI removal succeeded ($iHapiRslt)"
+        }
+        else
+        {
+            write-host "$((get-date).tostring()): WARNING: HAPI removal failed but may have not been installed ($iHapiRslt)" -ForegroundColor Yellow
+            write-log -FilePath $strLogfile -Type Warning -Message "$($strGuidPrefix): WARNING: HAPI removal failed but may have not been installed ($iHapiRslt)"
+            $iOverallWarningCt++
+        } 
+    }
 }
 
 
@@ -1197,7 +1525,18 @@ write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix):
 
 if ($iOverallErrorCt -eq 0 -and $iOverallWarningCt -eq 0)
 {
-    $iExitCode = 0
+    # Check if any values were changed
+    if ($iSettingsChangedCount -eq 0)
+    {
+        # No changes and no errors or warnings
+        $iExitCode = -1
+    }
+    else
+    {
+        # One or more changes and no errors or warnings
+        $iExitCode = 0
+    }
+
     write-host "`n$((get-date).tostring()): Script finished successfully (exit code: $iExitCode)"
     write-log -FilePath $strLogfile -Type Informational -Message "$($strGuidPrefix): Script finished successfully (exit code: $iExitCode)"
 }
