@@ -50,7 +50,7 @@ Note: Additional files that need to be persisted can be copied in, if needed, at
 |:---|:---|
 | Type | Run Command Line|
 | Name | Update WinPE | 
-| Command Line | cscript %DeployRoot%\Scripts\RMT_RefreshPC.wsf|
+| Command Line | cscript %DeployRoot%\Scripts\RMTRefreshPC.wsf|
 | Condition | Task Sequence Variable: _SMSTSInWinPE equals "False"|
 
 It's important that you add a condition to this step **_SMSTSInWinPE = False** so that the step doesn't try to execute again once the Task Sequence is resumed. This is because the TSEnv.dat was previously copied into the boot wim so it won't know that this step has already been executed.  
@@ -80,9 +80,11 @@ The build has now entered Phase 3 of the process, and the Task Sequence has been
 | Name | Format EFI Partition | 
 | Command Line | powershell.exe -ExecutionPolicy ByPass -file .\PrepareDisk.ps1 -BootDisk GPT -Action FormatEfiPartitionOnly |
 | Package | Prepare Disk|
+| Success Codes | -1 0 1|
 
 ### Use Toolkit Package
 Stage the Deployment Toolkit package.
+
 | Setting | Value|
 |:---|:---|
 | Type | Use Microsoft Deployment Toolkit Package|
