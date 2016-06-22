@@ -3,14 +3,15 @@ Refresh Multi-Tool
 
 A self-contained method for SCCM OSD Task Sequences to migrate a Windows 7 x64 computer to Windows 10 x64 in place while handling the following:
 * The device may or may not be encrypted with a 3rd party disk encryption software that cannot be easily disabled. 
-* After the procces is executed the local disk will be structured with GPT partitions
-* After the process is executed the BIOS will be configured to UEFI
+* After the procces executes the local disk will be structured with GPT partitions
+* After the process executes the BIOS will be configured to UEFI
 * Executed as part of a single task sequence
 * Executes on Dell OptiPlex, Latitude and Precision line hardware
+* No dependency on external infrastructure (file servers, PXE, etc)
 
 I want to recognize my team for their contributions to this effort; without them none of this would be possible. In no particular order they are Bob Burnes, Eric Michaelson and Kent Vareberg. Thanks Guys! You Rock!!
 
-Back when we were migrating from Windows XP to Windows 7 there were very few options to Refresh a PC if you had third party encryption software installed. Short of high-touch vendor options, decrypting every PC or standing up PXE infrastructure across your enterprise most customers like us where out of luck. My organization has ~70K endpoints spread out across the globe and the idea of sending an technican out to each and every computer was nothing short of a nightmare. We needed a automated technician-free method of migrating a user to Windows 7.
+Back when we were migrating from Windows XP to Windows 7 there were very few options to Refresh a PC if you had third-party encryption software installed. Short of high-touch vendor options, decrypting every PC or standing up PXE infrastructure across your enterprise most customers like us where out of luck. My organization has ~70K endpoints spread out across the globe and the idea of sending a technican out to each and every computer was nothing short of a nightmare. We needed a automated technician-free method of migrating a user to Windows 7.
 
 Why is this guy talking about migrating users from Windows XP to Windows 7? Easy, the method we developed for that is what this solution is based on. 
 
@@ -26,6 +27,16 @@ The diagram below illustrates at a high-level the steps which are executed as pa
 * ***Phase 3*** is executed from the context of the WinPE Ramdisk that got staged to the local disk in Phase 2.  The goal of this phase is to restart the task sequence where it left off previously. 
 
 ![Alt text](/Images/overview.png)
+
+## Minimum Requirements
+* Microsoft System Center Configuration Manger 2012
+* Microsoft Deployment Toolkit 2013 Update 2
+* Microsoft Assessment & Deployment Kit For Windows 10, Version 1511
+* Dell Command | Configure supported hardware 
+
+## Out Of Scope
+* Windows 7 UEFI to Windows 10 UEFI
+* Virtual Machines
 
 ## License & Authors
 Authors: 
